@@ -131,7 +131,10 @@ ValidatedRunner ValidateRunner(std::shared_ptr<TextModelRunner> runner,
     const std::size_t capacity = *resources.state_capacity_bytes;
     if (per_request != 0 && state_count > capacity / per_request) {
       throw std::invalid_argument(
-          "text runner request-state claim exceeds state capacity");
+          "text runner request-state claim exceeds state capacity (" +
+          std::to_string(state_count) + " states x " +
+          std::to_string(per_request) + " bytes > " + std::to_string(capacity) +
+          " bytes available)");
     }
   }
 

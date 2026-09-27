@@ -400,13 +400,18 @@ void TestBatchedAdvancePreservesIndependentRequests() {
 void TestResourceClaimsAreValidatedBeforeAllocation() {
   auto stats = std::make_shared<FakeStats>();
   bool rejected = false;
+  std::string message;
   try {
     auto runner = std::make_shared<FakeRunner>(stats, 64, 159);
     TextRunnerPool pool(runner, 2);
-  } catch (const std::invalid_argument&) {
+  } catch (const std::invalid_argument& error) {
     rejected = true;
+    message = error.what();
   }
   Expect(rejected, "aggregate request-state claim must fit capacity");
+  Expect(message.find("2 states x ") != std::string::npos &&
+             message.find("159 bytes available") != std::string::npos,
+         "the capacity error reports the claim and the capacity");
   Expect(stats->states_created == 0,
          "invalid resource claim is rejected before state allocation");
 }
