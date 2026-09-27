@@ -59,6 +59,9 @@ process APIs and builds only on Linux.
   registered host memory). Windows HIP counts `hipHostRegister`ed memory twice
   in `hipMemGetInfo`, which makes the server's admission check refuse to load
   although the capacity exists.
+- **Weights upload from the file**, read into pinned staging buffers and
+  overlapped with the device copies. This is about 2.5× faster than copying
+  from the mapped view, which faults in every 4 KiB page.
 - **The listening socket closes in `stop()`**, because `shutdown()` does not
   wake `accept()` on Windows. The build also skips `SO_REUSEADDR`, which on
   Windows allows another socket to take over a port that is still in use.

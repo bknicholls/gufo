@@ -1,7 +1,12 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include <sys/mman.h>
+#if defined(_WIN32)
+#include <io.h>
+#include <windows.h>
+#endif
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <cstring>
@@ -44,12 +49,104 @@ void ReleaseWeightRegions(std::vector<QwenGpuWeightRegion>& regions) noexcept {
 #endif
 }
 
+#if defined(_WIN32)
+// Reads the region's file straight into pinned staging buffers and overlaps
+// each read with the device copy of the previous one. Copying from the mapped
+// view instead faults in every 4 KiB page and runs several times slower.
+// Returns false when the file cannot be read this way, before any copy starts.
+[[nodiscard]] bool UploadFromFile(const core::GgufMappedRegion& source,
+                                  std::uint8_t* device_data,
+                                  hipError_t* status) {
+  const auto file =
+      reinterpret_cast<HANDLE>(_get_osfhandle(source.file_descriptor));
+  if (file == INVALID_HANDLE_VALUE)
+    return false;
+  constexpr std::size_t kChunkBytes = 64ULL << 20;
+  constexpr std::size_t kBuffers = 3;
+  hipStream_t stream = nullptr;
+  std::array<void*, kBuffers> staging{};
+  std::array<hipEvent_t, kBuffers> copied{};
+  const auto release = [&] {
+    if (stream != nullptr)
+      (void)hipStreamSynchronize(stream);
+    for (std::size_t slot = 0; slot < kBuffers; ++slot) {
+      if (copied[slot] != nullptr)
+        (void)hipEventDestroy(copied[slot]);
+      if (staging[slot] != nullptr)
+        (void)hipHostFree(staging[slot]);
+    }
+    if (stream != nullptr)
+      (void)hipStreamDestroy(stream);
+  };
+  *status = hipStreamCreateWithFlags(&stream, hipStreamNonBlocking);
+  for (std::size_t slot = 0; *status == hipSuccess && slot < kBuffers; ++slot) {
+    *status = hipHostMalloc(&staging[slot], kChunkBytes, hipHostMallocDefault);
+    if (*status == hipSuccess)
+      *status = hipEventCreateWithFlags(&copied[slot], hipEventDisableTiming);
+  }
+  if (*status != hipSuccess) {
+    release();
+    return false;
+  }
+  for (std::size_t offset = 0, index = 0; offset < source.size;
+       offset += kChunkBytes, ++index) {
+    const auto slot = index % kBuffers;
+    const auto bytes = std::min(kChunkBytes, source.size - offset);
+    if (index >= kBuffers &&
+        (*status = hipEventSynchronize(copied[slot])) != hipSuccess)
+      break;
+    auto* buffer = static_cast<std::uint8_t*>(staging[slot]);
+    for (std::size_t done = 0; done < bytes;) {
+      OVERLAPPED position{};
+      const auto at = static_cast<std::uint64_t>(offset + done);
+      position.Offset = static_cast<DWORD>(at & 0xFFFFFFFFULL);
+      position.OffsetHigh = static_cast<DWORD>(at >> 32);
+      DWORD count = 0;
+      if (!ReadFile(file, buffer + done, static_cast<DWORD>(bytes - done),
+                    &count, &position) ||
+          count == 0) {
+        *status = hipErrorFileNotFound;
+        break;
+      }
+      done += count;
+    }
+    if (*status != hipSuccess ||
+        (*status = hipMemcpyAsync(device_data + offset, buffer, bytes,
+                                  hipMemcpyHostToDevice, stream)) !=
+            hipSuccess ||
+        (*status = hipEventRecord(copied[slot], stream)) != hipSuccess)
+      break;
+  }
+  if (*status == hipSuccess)
+    *status = hipStreamSynchronize(stream);
+  release();
+  return true;
+}
+#endif
+
 [[nodiscard]] hipError_t CopyToDeviceRegion(
     const core::GgufMappedRegion& source, QwenGpuWeightRegion& destination) {
   void* device_data = nullptr;
   if (const auto error = hipMalloc(&device_data, source.size);
       error != hipSuccess)
     return error;
+#if defined(_WIN32)
+  if (source.file_descriptor >= 0) {
+    hipError_t status = hipSuccess;
+    if (UploadFromFile(source, static_cast<std::uint8_t*>(device_data),
+                       &status)) {
+      if (status != hipSuccess) {
+        (void)hipFree(device_data);
+        return status;
+      }
+      destination = {.host_data = source.data,
+                     .device_data = device_data,
+                     .host_copy = nullptr,
+                     .size = source.size};
+      return hipSuccess;
+    }
+  }
+#endif
   constexpr std::size_t kChunkBytes = 256ULL << 20;
   const auto* input = static_cast<const std::uint8_t*>(source.data);
   for (std::size_t offset = 0; offset < source.size; offset += kChunkBytes) {
