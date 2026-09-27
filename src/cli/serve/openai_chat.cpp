@@ -1879,4 +1879,13 @@ HttpResponse HandleOpenAiChat(const HttpRequest& request,
   }
 }
 
+ReasoningSplit SplitReasoning(
+    std::string_view raw,
+    TextGenerationBackend::InitialOutputState initial_output_state) {
+  auto parsed = ParseGeneration(raw, initial_output_state, {},
+                                ChatRequest::ToolChoice::kNone, false);
+  return {.reasoning = std::move(parsed.reasoning_content),
+          .text = std::move(parsed.text)};
+}
+
 }  // namespace gufo::server

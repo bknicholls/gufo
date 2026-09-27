@@ -48,6 +48,10 @@ public:
   gufo::ReasoningOptions reasoning_defaults() const override {
     return reasoning;
   }
+  InitialOutputState initial_output_state(
+      const gufo::server::ChatRequest&) const override {
+    return initial_output;
+  }
   std::size_t count_tokens(std::string_view text) const override {
     return text.size();
   }
@@ -118,6 +122,7 @@ public:
   std::atomic<int> failure{0};
   std::string forced_stop_sequence;
   gufo::ReasoningOptions reasoning;
+  InitialOutputState initial_output{InitialOutputState::kAuto};
   bool wait_for_disconnect{false};
   std::atomic<bool> disconnected{false};
   std::binary_semaphore entered{0};
@@ -671,6 +676,41 @@ void TestCompatibilityThinkingDefaults() {
   }
 }
 
+void TestAnthropicReasoningBlocks() {
+  RunningServer server;
+  const auto content = [&server](std::string output) {
+    server.backend->SetOutput(std::move(output));
+    const auto response = server.Post(
+        "/v1/messages",
+        R"({"messages":[{"role":"user","content":"hello"}],"max_tokens":32})");
+    ExpectStatus(response, 200);
+    return gufo::json::parse(response.substr(response.find("\r\n\r\n") + 4))
+        .find("content")
+        ->items();
+  };
+  for (const auto& [initial, output] : {
+           std::pair{TextGenerationBackend::InitialOutputState::kAuto,
+                     "<think>\nPlan.\n</think>\nAnswer."},
+           std::pair{TextGenerationBackend::InitialOutputState::kReasoning,
+                     "Plan.\n</think>\n\nAnswer."},
+       }) {
+    server.backend->initial_output = initial;
+    const auto blocks = content(output);
+    assert(blocks.size() == 2);
+    assert(blocks[0].member_str("type") == "thinking");
+    assert(blocks[0].member_str("thinking") == "Plan.");
+    assert(blocks[0].member_str("signature", "missing").empty());
+    assert(blocks[1].member_str("type") == "text");
+    assert(blocks[1].member_str("text") == "Answer.");
+  }
+  server.backend->initial_output =
+      TextGenerationBackend::InitialOutputState::kAuto;
+  const auto blocks = content("Answer.");
+  assert(blocks.size() == 1);
+  assert(blocks[0].member_str("type") == "text");
+  assert(blocks[0].member_str("text") == "Answer.");
+}
+
 void TestStreamingFraming() {
   RunningServer server;
   const std::string chunks = std::string("3\r\na\0b\r\n", 8) + "3\r\nend\r\n";
@@ -744,6 +784,7 @@ int main() {
   TestCompatibilityRequests();
   TestCompatibilityStopSequences();
   TestCompatibilityThinkingDefaults();
+  TestAnthropicReasoningBlocks();
   TestCompatibilityUtf8();
   TestPeerDisconnect();
   TestStreamingFraming();

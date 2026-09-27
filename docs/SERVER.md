@@ -475,7 +475,8 @@ The other compatibility routes are deliberately limited:
 
 All four routes validate the loaded model, positive integer limits and shared
 sampling controls. The three routes above reject streaming; all reject multiple
-candidates. Responses and Messages honor the server's thinking defaults.
+candidates. Responses and Messages honor the server's thinking defaults;
+Messages returns generated reasoning as a `thinking` block before the text.
 Native Messages rejects tools, `thinking`, and `output_config`; use Chat
 Completions for tool/reasoning controls. Completions routes accept `stop`;
 Messages accepts `stop_sequences`. Responses has no stop-sequence field.

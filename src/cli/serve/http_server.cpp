@@ -788,6 +788,7 @@ HttpResponse AnthropicMessages(const HttpRequest& req,
                                             StopSequenceFormat::kAnthropic,
                                             &chat.stop_sequences))
     return InvalidCompatibilityRequest(*error);
+  const auto initial_output_state = b.initial_output_state(chat);
   const auto res = b.chat(chat, max_tokens, sampling_config, req.is_cancelled);
 
   json::Value resp = json::Value::object();
@@ -795,10 +796,21 @@ HttpResponse AnthropicMessages(const HttpRequest& req,
   resp["type"] = "message";
   resp["role"] = "assistant";
   resp["model"] = b.model_id();
+  // Anthropic returns reasoning as its own block ahead of the answer, not as
+  // part of the text.
+  const auto split = SplitReasoning(core::Utf8Decoder{}.Push(res.text, true),
+                                    initial_output_state);
   json::Value content = json::Value::array();
+  if (!split.reasoning.empty()) {
+    json::Value thinking = json::Value::object();
+    thinking["type"] = "thinking";
+    thinking["thinking"] = split.reasoning;
+    thinking["signature"] = "";
+    content.push_back(std::move(thinking));
+  }
   json::Value txt = json::Value::object();
   txt["type"] = "text";
-  txt["text"] = core::Utf8Decoder{}.Push(res.text, true);
+  txt["text"] = split.text;
   content.push_back(std::move(txt));
   resp["content"] = std::move(content);
   resp["stop_reason"] =
