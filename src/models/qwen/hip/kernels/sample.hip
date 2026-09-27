@@ -10,6 +10,7 @@
 #include <stdexcept>
 
 #include "src/core/hip/hip_utils.hpp"
+#include "src/models/qwen/hip/ops/fill.hpp"
 #include "src/models/qwen/hip/ops/token.hpp"
 
 namespace gufo::hip {
@@ -1283,7 +1284,7 @@ void LaunchGPUSpeculativeSampling(
   // The unsorted token IDs are dead after sorting. Reuse that buffer for q;
   // residual evaluation then makes one lookup per vocabulary token.
   auto* draft_probabilities = reinterpret_cast<float*>(workspace->token_ids);
-  HIP_CHECK(hipMemsetAsync(draft_probabilities, 0, vocab_size * sizeof(float),
+  HIP_CHECK(LaunchZeroFill(draft_probabilities, vocab_size * sizeof(float),
                            stream));
   ScatterDraftProbabilitiesKernel<<<
       static_cast<unsigned>((draft_candidate_count + kSamplingThreads - 1) /

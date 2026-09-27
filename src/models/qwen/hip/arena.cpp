@@ -12,6 +12,7 @@
 #include "src/core/hip/snapshot_transfer.hpp"
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "src/models/qwen/hip/executor.hpp"
+#include "src/models/qwen/hip/ops/fill.hpp"
 #include "src/models/qwen/hip/ops/gemm.hpp"
 
 namespace gufo::hip {
@@ -1090,12 +1091,12 @@ void QwenGpuArena::Reset() {
   // writes those rows before use; clearing reserved future KV adds O(capacity)
   // work to every short conversation and snapshot restore.
   if (d_ssm_conv_state != nullptr) {
-    HIP_CHECK(hipMemsetAsync(d_ssm_conv_state, 0, total_conv * sizeof(float),
-                             stream));
+    HIP_CHECK(
+        LaunchZeroFill(d_ssm_conv_state, total_conv * sizeof(float), stream));
   }
   if (d_ssm_deltanet_state != nullptr) {
-    HIP_CHECK(hipMemsetAsync(
-        d_ssm_deltanet_state, 0,
+    HIP_CHECK(LaunchZeroFill(
+        d_ssm_deltanet_state,
         total_deltanet *
             QwenRecurrentStateElementBytes(policy_.recurrent_state_storage),
         stream));
