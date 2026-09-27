@@ -11,6 +11,7 @@
 #include <cstring>
 
 #include "src/cli/serve/audio_stream.hpp"
+#include "src/cli/serve/socket_compat.hpp"
 #include "src/core/utf8.hpp"
 
 namespace gufo::server {
@@ -87,12 +88,12 @@ WebSocket::WebSocket(int fd, std::string buffered)
   // Frame headers and audio payloads are separate writes; do not wait for a
   // delayed TCP acknowledgement before sending the payload.
   const int no_delay = 1;
-  (void)::setsockopt(fd_, IPPROTO_TCP, TCP_NODELAY, &no_delay,
+  (void)::setsockopt(fd_, IPPROTO_TCP, TCP_NODELAY,
+                     reinterpret_cast<const char*>(&no_delay),
                      sizeof(no_delay));
   // Bound backpressure from a client that stops consuming audio. Read timeout
   // stays at the server's idle timeout.
-  const timeval timeout{5, 0};
-  (void)::setsockopt(fd_, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+  SetSocketTimeout(fd_, SO_SNDTIMEO, 5);
   reader_ = std::jthread([this] { ReadLoop(); });
 }
 
