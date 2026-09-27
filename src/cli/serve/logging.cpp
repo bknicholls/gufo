@@ -2,6 +2,14 @@
 
 #include <unistd.h>
 
+#if defined(_WIN32)
+// psapi.h needs the types windows.h declares, so the order is fixed.
+// clang-format off
+#include <windows.h>
+#include <psapi.h>
+// clang-format on
+#endif
+
 #include <array>
 #include <chrono>
 #include <cstdlib>
@@ -89,9 +97,19 @@ void Logger::Log(LogLevel level, std::string_view component,
 
 std::string Logger::MemoryStatus() {
   std::ostringstream output;
+#if defined(_WIN32)
+  PROCESS_MEMORY_COUNTERS process{};
+  (void)GetProcessMemoryInfo(GetCurrentProcess(), &process, sizeof(process));
+  MEMORYSTATUSEX host{};
+  host.dwLength = sizeof(host);
+  (void)GlobalMemoryStatusEx(&host);
+  output << "rss_mib=" << process.WorkingSetSize / (1024 * 1024)
+         << " host_available_mib=" << host.ullAvailPhys / (1024 * 1024);
+#else
   output << "rss_mib=" << ReadMemoryKiB("/proc/self/status", "VmRSS:") / 1024
          << " host_available_mib="
          << ReadMemoryKiB("/proc/meminfo", "MemAvailable:") / 1024;
+#endif
   return output.str();
 }
 

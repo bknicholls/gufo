@@ -45,7 +45,11 @@ public:
   Value(long long v) : type_(Type::kNumber), num_(static_cast<double>(v)) {}
   Value(unsigned long long v)
       : type_(Type::kNumber), num_(static_cast<double>(v)) {}
+#if !defined(_WIN32)
+  // std::size_t is unsigned long on LP64 but unsigned long long on Windows,
+  // where this overload would redeclare the constructor above.
   Value(std::size_t v) : type_(Type::kNumber), num_(static_cast<double>(v)) {}
+#endif
   Value(const char* v) : type_(Type::kString), str_(v) {}
   Value(const std::string& v) : type_(Type::kString), str_(v) {}
   Value(std::string&& v) : type_(Type::kString), str_(std::move(v)) {}

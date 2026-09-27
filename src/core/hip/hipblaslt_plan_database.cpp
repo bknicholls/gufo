@@ -352,6 +352,11 @@ bool SaveHipblasLtPlanDatabase(const std::filesystem::path& path,
       *error = "failed to flush plan database";
     return false;
   }
+#if defined(_WIN32)
+  // Windows cannot rename a file that still has an open CRT handle.
+  ::close(publication.file);
+  publication.file = -1;
+#endif
   std::filesystem::rename(publication.temporary, path, filesystem_error);
   if (filesystem_error) {
     if (error)
