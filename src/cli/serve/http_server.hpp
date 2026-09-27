@@ -3,11 +3,13 @@
 
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -86,6 +88,13 @@ struct HttpServerOptions {
   std::size_t max_request_body_bytes{static_cast<std::size_t>(8) * 1024 * 1024};
   std::size_t max_connections{16};
   std::string api_key;
+  /// Stop serving after this long with no open connection; zero never stops.
+  /// Every request holds its connection until the response ends, so an
+  /// in-progress generation always counts as activity.
+  std::chrono::seconds idle_timeout{0};
+  /// When set, called once per idle period instead of stopping, and the
+  /// server keeps serving. Runs on the idle watchdog thread.
+  std::function<void()> on_idle;
 };
 
 /// Minimal bounded HTTP/1.1 server for trusted-LAN model serving.
@@ -125,6 +134,7 @@ private:
   void handle_connection(int client_fd);
   void reap_workers();
   void register_routes();
+  void stop_when_idle(std::stop_token stop_requested);
 
   std::string host_;
   int port_;
@@ -140,6 +150,11 @@ private:
   std::mutex workers_mutex_;
   std::vector<std::unique_ptr<ConnectionWorker>> workers_;
   std::vector<std::pair<std::pair<std::string, std::string>, Handler>> routes_;
+  std::atomic<std::size_t> open_connections_{0};
+  std::atomic<std::chrono::steady_clock::rep> last_activity_{
+      std::chrono::steady_clock::now().time_since_epoch().count()};
+  // Declared last so it is joined before the members it reads are destroyed.
+  std::jthread idle_watchdog_;
 };
 
 namespace detail {

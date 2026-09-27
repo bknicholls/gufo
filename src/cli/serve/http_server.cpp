@@ -148,6 +148,10 @@ bool SendChunk(int fd, std::string_view data) {
          SendAll(fd, data) && SendAll(fd, "\r\n");
 }
 
+std::chrono::steady_clock::rep NowTicks() noexcept {
+  return std::chrono::steady_clock::now().time_since_epoch().count();
+}
+
 bool IsPeerDisconnected(int fd) noexcept {
   pollfd descriptor{
       .fd = static_cast<decltype(pollfd::fd)>(fd),
@@ -1149,12 +1153,18 @@ void HttpServer::run(bool handle_signals) {
       throw std::system_error(errno, std::generic_category(),
                               "configure HTTP listener");
   }
+  if (options_.idle_timeout.count() > 0) {
+    idle_watchdog_ = std::jthread([this](std::stop_token stop_requested) {
+      stop_when_idle(stop_requested);
+    });
+  }
   Logger::Info(
       "server",
       "event=listening address=http://" + host_ + ":" + std::to_string(port_) +
           " auth=" + (options_.api_key.empty() ? "off" : "bearer") +
           " max_connections=" + std::to_string(options_.max_connections) +
-          " max_body_bytes=" + std::to_string(options_.max_request_body_bytes));
+          " max_body_bytes=" + std::to_string(options_.max_request_body_bytes) +
+          " idle_timeout_s=" + std::to_string(options_.idle_timeout.count()));
   while (!stopped_.load(std::memory_order_acquire)) {
     if (handle_signals) {
       const int signal = shutdown_signal.load(std::memory_order_relaxed);
@@ -1175,6 +1185,9 @@ void HttpServer::run(bool handle_signals) {
         continue;
     }
     const int client_fd = ::accept(listen_fd_, nullptr, nullptr);
+    // Mark activity before the worker starts, so a connection accepted as the
+    // idle timeout expires is not dropped before it is counted.
+    last_activity_.store(NowTicks(), std::memory_order_release);
     if (client_fd < 0) {
       if (stopped_.load(std::memory_order_acquire)) {
         break;
@@ -1220,6 +1233,40 @@ void HttpServer::run(bool handle_signals) {
     }
   }
   reap_workers();
+}
+
+void HttpServer::stop_when_idle(std::stop_token stop_requested) {
+  using Clock = std::chrono::steady_clock;
+  // The activity mark the idle hook last ran for. A request moves the mark on,
+  // so the hook runs once per idle period.
+  std::optional<Clock::rep> handled_idle_since;
+  while (!stop_requested.stop_requested() &&
+         !stopped_.load(std::memory_order_acquire)) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    if (open_connections_.load(std::memory_order_acquire) != 0)
+      continue;
+    const auto idle =
+        Clock::now() - Clock::time_point(Clock::duration(
+                           last_activity_.load(std::memory_order_acquire)));
+    if (idle >= options_.idle_timeout) {
+      if (options_.on_idle) {
+        const auto idle_since = last_activity_.load(std::memory_order_acquire);
+        if (handled_idle_since != idle_since) {
+          handled_idle_since = idle_since;
+          options_.on_idle();
+        }
+        continue;
+      }
+      Logger::Info(
+          "server",
+          "event=idle_shutdown idle_s=" +
+              std::to_string(
+                  std::chrono::duration_cast<std::chrono::seconds>(idle)
+                      .count()));
+      stop();
+      return;
+    }
+  }
 }
 
 void HttpServer::stop() {
@@ -1363,6 +1410,22 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
 }
 
 void HttpServer::handle_connection(int client_fd) {
+  // Counts as activity for the idle timeout until the response ends, which
+  // includes the whole of a streamed generation.
+  struct OpenConnection {
+    explicit OpenConnection(HttpServer& owner) : server(owner) {
+      server.last_activity_.store(NowTicks(), std::memory_order_release);
+      server.open_connections_.fetch_add(1, std::memory_order_acq_rel);
+    }
+    ~OpenConnection() {
+      server.open_connections_.fetch_sub(1, std::memory_order_acq_rel);
+      server.last_activity_.store(NowTicks(), std::memory_order_release);
+    }
+    OpenConnection(const OpenConnection&) = delete;
+    OpenConnection& operator=(const OpenConnection&) = delete;
+    HttpServer& server;
+  } open_connection{*this};
+
   SetSocketTimeout(client_fd, SO_RCVTIMEO, 120);
   SetSocketTimeout(client_fd, SO_SNDTIMEO, 120);
 

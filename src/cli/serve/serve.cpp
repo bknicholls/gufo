@@ -573,6 +573,11 @@ void PrintServeHelp(std::string_view program_name,
                      "RAM limit for queued snapshots and each disk read "
                      "(default: 0 = auto, at most 1 GiB and 1/8 available RAM)",
                      "Cache", &cache_disk_staging_bytes);
+    std::uint64_t idle_timeout_seconds = 0;
+    parser.AddOption("", "--idle-timeout", "SEC",
+                     "Exit after SEC seconds without a request; 0 never "
+                     "(default: 0)",
+                     "Server", &idle_timeout_seconds);
     ServerOptionHelpTargets server_help;
     AddServerOptionsForHelp(parser, &server_help);
     parser.PrintHelp();
@@ -653,6 +658,7 @@ int RunServe(std::span<const char* const> args) {
       static_cast<std::size_t>(8) * 1024 * 1024;
   std::string api_key;
   bool verbose = false;
+  std::uint64_t idle_timeout_seconds = 0;
 
   // Identify the modality only after leading server options. The selected
   // parser consumes every option together, so --served-model-name -v and
@@ -1026,6 +1032,10 @@ int RunServe(std::span<const char* const> args) {
         "RAM limit for queued snapshots and each disk read "
         "(default: 0 = auto, at most 1 GiB and 1/8 available RAM)",
         "Cache", &cache_disk_staging_bytes);
+    llm_parser.AddOption("", "--idle-timeout", "SEC",
+                         "Exit after SEC seconds without a request; 0 never "
+                         "(default: 0)",
+                         "Server", &idle_timeout_seconds);
 
     add_server_options(llm_parser);
     if (!llm_parser.Parse(sub_args, &parse_err)) {
@@ -1182,6 +1192,7 @@ int RunServe(std::span<const char* const> args) {
           .max_request_body_bytes = max_request_body_bytes,
           .max_connections = max_connections,
           .api_key = std::move(api_key),
+          .idle_timeout = std::chrono::seconds(idle_timeout_seconds),
       },
       images);
   std::string err;

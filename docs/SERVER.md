@@ -622,6 +622,9 @@ token to populate the cache. A failed model operation invalidates its mutable
 state; the prompt snapshot remains available for safe replay. Image identity,
 positions and speculative state participate in restoration and cache isolation.
 
+`--idle-timeout SEC` stops the server after SEC seconds without an open
+connection or request.
+
 `GET /health` reports process liveness. `GET /ready` returns 503 until a model
 service is ready, then reports `status` and the active model. It does not expose
 a GPU health matrix. HTTP model replacement and persistent Responses

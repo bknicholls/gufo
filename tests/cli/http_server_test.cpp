@@ -740,6 +740,25 @@ void TestAnthropicReasoningControls() {
   ExpectStatus(post(R"("thinking":{"type":"sometimes"})"), 400);
 }
 
+void TestIdleTimeout() {
+  {
+    std::atomic<int> idle_periods{0};
+    RunningServer server(gufo::server::HttpServerOptions{
+        .idle_timeout = std::chrono::seconds(1),
+        .on_idle = [&idle_periods] { ++idle_periods; },
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(2500));
+    assert(idle_periods == 1);
+    ExpectStatus(server.Post("/echo", "still serving"), 200);
+    std::this_thread::sleep_for(std::chrono::milliseconds(2500));
+    assert(idle_periods == 2);
+  }
+  RunningServer server(gufo::server::HttpServerOptions{
+      .idle_timeout = std::chrono::seconds(1),
+  });
+  assert(server.run_finished.try_acquire_for(std::chrono::seconds(5)));
+}
+
 void TestStreamingFraming() {
   RunningServer server;
   const std::string chunks = std::string("3\r\na\0b\r\n", 8) + "3\r\nend\r\n";
@@ -815,6 +834,7 @@ int main() {
   TestCompatibilityThinkingDefaults();
   TestAnthropicReasoningBlocks();
   TestAnthropicReasoningControls();
+  TestIdleTimeout();
   TestCompatibilityUtf8();
   TestPeerDisconnect();
   TestStreamingFraming();
