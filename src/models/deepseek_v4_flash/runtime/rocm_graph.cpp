@@ -7903,6 +7903,25 @@ static int rocm_graph_load_payload(ds4_rocm_graph* graph,
   return 0;
 }
 
+#if defined(_WIN32)
+// The Windows CRT has no fmemopen. A temporary file stands in for the memory
+// stream: restores copy the snapshot into it, and saves copy it back out.
+static FILE* snapshot_read_stream(const void* data, size_t size) {
+  FILE* fp = tmpfile();
+  if (fp &&
+      (fwrite(data, 1, size, fp) != size || fseek(fp, 0, SEEK_SET) != 0)) {
+    fclose(fp);
+    return nullptr;
+  }
+  return fp;
+}
+
+static bool snapshot_copy_out(FILE* fp, void* data, size_t size) {
+  return fflush(fp) == 0 && fseek(fp, 0, SEEK_SET) == 0 &&
+         fread(data, 1, size, fp) == size;
+}
+#endif
+
 int ds4_rocm_graph_save_snapshot(const ds4_rocm_graph* graph,
                                  const ds4_tokens* checkpoint,
                                  const float* logits, uint32_t prefill_capacity,
@@ -7938,7 +7957,11 @@ int ds4_rocm_graph_save_snapshot(const ds4_rocm_graph* graph,
     snap->cap = bytes + 1u;
   }
 
+#if defined(_WIN32)
+  FILE* fp = tmpfile();
+#else
   FILE* fp = fmemopen(snap->ptr, static_cast<size_t>(bytes + 1u), "wb");
+#endif
   if (!fp) {
     payload_set_err(err, errlen,
                     "failed to open memory stream for session snapshot");
@@ -7947,6 +7970,14 @@ int ds4_rocm_graph_save_snapshot(const ds4_rocm_graph* graph,
   const int rc =
       rocm_graph_save_payload(graph, checkpoint, logits, prefill_capacity,
                               context_size, state, fp, err, errlen);
+#if defined(_WIN32)
+  if (rc == 0 &&
+      !snapshot_copy_out(fp, snap->ptr, static_cast<size_t>(bytes))) {
+    fclose(fp);
+    payload_set_err(err, errlen, "failed to finalize memory session snapshot");
+    return 1;
+  }
+#endif
   if (fclose(fp) != 0 && rc == 0) {
     payload_set_err(err, errlen, "failed to finalize memory session snapshot");
     return 1;
@@ -7973,7 +8004,11 @@ int ds4_rocm_graph_load_snapshot(ds4_rocm_graph* graph, ds4_tokens* checkpoint,
         return 1;
     }
 
+#if defined(_WIN32)
+    FILE* fp = snapshot_read_stream(snap->ptr, (size_t)snap->len);
+#else
     FILE *fp = fmemopen((void *)snap->ptr, (size_t)snap->len, "rb");
+#endif
     if (!fp) {
         payload_set_err(err, errlen, "failed to open memory stream for session snapshot restore");
         return 1;

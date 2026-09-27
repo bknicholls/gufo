@@ -28,7 +28,6 @@ extern "C" int ds4_hip_q8_fold_take_q81(
 #include <limits.h>
 #include <math.h>
 #include <fcntl.h>
-#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
