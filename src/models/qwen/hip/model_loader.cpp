@@ -24,9 +24,53 @@ void ReleaseWeightRegions(std::vector<QwenGpuWeightRegion>& regions) noexcept {
     if (region.host_copy != nullptr) {
       (void)hipHostUnregister(region.host_copy);
       (void)munmap(region.host_copy, region.size);
+    } else if (region.device_data != nullptr) {
+      (void)hipFree(region.device_data);
     }
     region = {};
   }
+}
+
+[[nodiscard]] bool UseDeviceWeightRegions() noexcept {
+  const char* value = std::getenv("GUFO_DEVICE_WEIGHTS");
+#if defined(_WIN32)
+  // Windows HIP reports registered host memory against the device pool twice
+  // in hipMemGetInfo, so pinned weights starve the server's admission check
+  // even though the capacity exists. Device copies are accounted once, and
+  // the driver chooses their page size instead of the 4 KiB host pages.
+  return value == nullptr || value[0] != '0';
+#else
+  return value != nullptr && value[0] == '1';
+#endif
+}
+
+[[nodiscard]] hipError_t CopyToDeviceRegion(
+    const core::GgufMappedRegion& source, QwenGpuWeightRegion& destination) {
+  void* device_data = nullptr;
+  if (const auto error = hipMalloc(&device_data, source.size);
+      error != hipSuccess)
+    return error;
+  constexpr std::size_t kChunkBytes = 256ULL << 20;
+  const auto* input = static_cast<const std::uint8_t*>(source.data);
+  for (std::size_t offset = 0; offset < source.size; offset += kChunkBytes) {
+    const auto bytes = std::min(kChunkBytes, source.size - offset);
+    if (const auto error =
+            hipMemcpy(static_cast<std::uint8_t*>(device_data) + offset,
+                      input + offset, bytes, hipMemcpyHostToDevice);
+        error != hipSuccess) {
+      (void)hipFree(device_data);
+      return error;
+    }
+    // The device copy now owns these bytes. Keep the mapping valid for the
+    // reader without keeping its pages resident.
+    (void)madvise(const_cast<std::uint8_t*>(input) + offset, bytes,
+                  MADV_DONTNEED);
+  }
+  destination = {.host_data = source.data,
+                 .device_data = device_data,
+                 .host_copy = nullptr,
+                 .size = source.size};
+  return hipSuccess;
 }
 
 void CopyMappedWeights(const core::GgufMappedRegion& source, void* copy) {
@@ -113,7 +157,9 @@ void CopyMappedWeights(const core::GgufMappedRegion& source, void* copy) {
     auto& destination = weight_regions[i];
     hipError_t map_error;
     try {
-      map_error = MapRegisteredRegion(source, destination);
+      map_error = UseDeviceWeightRegions()
+                      ? CopyToDeviceRegion(source, destination)
+                      : MapRegisteredRegion(source, destination);
     } catch (const std::exception& e) {
       ReleaseWeightRegions(weight_regions);
       if (error_msg)

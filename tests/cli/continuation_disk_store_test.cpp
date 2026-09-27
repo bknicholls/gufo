@@ -60,7 +60,7 @@ void Expect(bool condition, std::string_view message) {
 class TemporaryDirectory {
 public:
   TemporaryDirectory() {
-    std::array<char, 64> pattern{};
+    std::array<char, 256> pattern{};
     const std::string base = (std::filesystem::temp_directory_path() /
                               "gufo-continuation-disk-XXXXXX")
                                  .string();
@@ -463,6 +463,9 @@ void TestCorruptionBecomesDeterministicMissAndRemoval() {
   stream.write(&value, 1);
   stream.close();
 
+#if !defined(_WIN32)
+  // Windows directory ACLs, not mode bits, govern deletion, so there the
+  // unlink failure cannot be simulated this way.
   if (::geteuid() != 0) {
     Expect(::chmod(directory.path().c_str(), S_IRUSR | S_IXUSR) == 0,
            "cache directory can simulate an unlink failure");
@@ -478,6 +481,7 @@ void TestCorruptionBecomesDeterministicMissAndRemoval() {
     Expect(returned && !result.restored && store.entry_count() == 1,
            "unremovable corrupt entries miss without an infinite retry");
   }
+#endif
 
   auto state = runner.CreateState();
   Expect(!RestoreTokens(store, runner, *state, {4, 4, 4, 5}).restored,
@@ -667,12 +671,18 @@ void TestAtomicPublicationAndPrivatePermissions() {
     Expect(!entry.path().filename().string().starts_with(".tmp-"),
            "successful publication leaves no temporary file");
   }
+#if defined(_WIN32)
+  // Windows grants file access through ACLs, which mode bits do not reflect.
+  Expect(std::filesystem::is_regular_file(files.front()),
+         "published cache file is a regular file");
+#else
   struct stat status{};
   Expect(::lstat(files.front().c_str(), &status) == 0 &&
              S_ISREG(status.st_mode) &&
              (status.st_mode & (S_IRWXG | S_IRWXO)) == 0 &&
              (status.st_mode & S_IRUSR) != 0 && (status.st_mode & S_IWUSR) != 0,
          "published cache file is private and owner read-write");
+#endif
 }
 
 void TestStartupRejectsUnsafeAndInvalidFiles() {
@@ -729,7 +739,10 @@ void TestStartupRejectsUnsafeAndInvalidFiles() {
     output << "must survive";
   }
   const auto unsafe_link = directory.path() / "unsafe.kvc";
-  std::filesystem::create_symlink(target.filename(), unsafe_link);
+  // Windows creates symlinks only with developer mode or elevation.
+  std::error_code link_error;
+  std::filesystem::create_symlink(target.filename(), unsafe_link, link_error);
+  const bool linked = !link_error;
 
   std::vector<ContinuationDiskEvent> events;
   ContinuationDiskStore restarted(
@@ -738,9 +751,9 @@ void TestStartupRejectsUnsafeAndInvalidFiles() {
   Expect(
       restarted.entry_count() == 2 && CacheFiles(directory.path()).size() == 2,
       "startup indexes only checksum-valid regular entries");
-  Expect(
-      std::filesystem::exists(target) && !std::filesystem::exists(unsafe_link),
-      "unsafe symlink is removed without following its target");
+  Expect(std::filesystem::exists(target) &&
+             (!linked || !std::filesystem::exists(unsafe_link)),
+         "unsafe symlink is removed without following its target");
   Expect(
       std::ranges::any_of(events,
                           [](const ContinuationDiskEvent& event) {
@@ -753,11 +766,12 @@ void TestStartupRejectsUnsafeAndInvalidFiles() {
                 return event.reason ==
                        ContinuationDiskEventReason::kChecksumMismatch;
               }) &&
-          std::ranges::any_of(events,
-                              [](const ContinuationDiskEvent& event) {
-                                return event.reason ==
-                                       ContinuationDiskEventReason::kUnsafeFile;
-                              }),
+          (!linked || std::ranges::any_of(
+                          events,
+                          [](const ContinuationDiskEvent& event) {
+                            return event.reason ==
+                                   ContinuationDiskEventReason::kUnsafeFile;
+                          })),
       "startup reports sanitized invalid-file reasons");
 
   std::size_t compatible_hits = 0;
@@ -783,7 +797,13 @@ void TestRootSymlinkIsRejected() {
   const auto target = directory.path() / "target";
   const auto link = directory.path() / "cache-link";
   std::filesystem::create_directory(target);
-  std::filesystem::create_directory_symlink(target.filename(), link);
+  // Windows creates symlinks only with developer mode or elevation.
+  std::error_code link_error;
+  std::filesystem::create_directory_symlink(target.filename(), link,
+                                            link_error);
+  if (link_error) {
+    return;
+  }
   bool rejected = false;
   try {
     ContinuationDiskStore store(StoreOptions(link));

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 project(gufo LANGUAGES C CXX)
-if (NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
+if (NOT CMAKE_SYSTEM_NAME MATCHES "^(Linux|Windows)$" OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
   message(FATAL_ERROR "Gufo requires Linux x86-64 with an AMD gfx1151 GPU")
 endif()
 if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
@@ -17,6 +17,21 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(GUFO_VERSION "development" CACHE STRING "Gufo build revision")
 include_directories(${CMAKE_SOURCE_DIR})
+# Windows builds compile the POSIX sources against the shims in windows/shim.
+# The prelude must precede every system header; see its comments.
+if (WIN32)
+  include_directories(BEFORE ${CMAKE_SOURCE_DIR}/windows/shim)
+  add_compile_options(
+    "SHELL:-include ${CMAKE_SOURCE_DIR}/windows/shim/gufo_windows_prelude.h")
+  # NOUSER keeps winuser.h macros such as DrawState from renaming gufo symbols.
+  add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN NOUSER
+    _CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_WARNINGS)
+  set(CMAKE_MSVC_RUNTIME_LIBRARY MultiThreadedDLL)
+  link_libraries(ws2_32 bcrypt psapi)
+  # binmode.obj makes CRT descriptors and streams binary by default, as POSIX
+  # descriptors are; otherwise reads of model files translate line endings.
+  add_link_options(LINKER:binmode.obj)
+endif()
 find_package(ICU REQUIRED COMPONENTS uc i18n)
 find_package(Threads REQUIRED)
 find_package(CURL REQUIRED)
@@ -229,10 +244,12 @@ if (ENGINE_ENABLE_HIP)
 endif()
 target_link_libraries(gufo PRIVATE gufo_qwen3_tts gufo_qwen3_asr)
 
+if (NOT WIN32)
 add_custom_target(gufo-server ALL
   COMMAND ${CMAKE_COMMAND} -E create_symlink $<TARGET_FILE_NAME:gufo> ${CMAKE_CURRENT_BINARY_DIR}/gufo-server
   DEPENDS gufo
 )
+endif()
 if (BUILD_TESTING OR GUFO_BUILD_TOOLS)
   add_library(gufo_kernel_bench_support STATIC
     src/cli/bench/kernel_bench.cpp)
@@ -282,7 +299,9 @@ endif()
 include(CTest)
 
 # Test assertions remain active when model code uses production optimization.
-if (BUILD_TESTING)
+# The suite relies on POSIX process and filesystem APIs; Windows builds the
+# portable subset registered after it.
+if (BUILD_TESTING AND NOT WIN32)
   add_compile_options(-UNDEBUG)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
@@ -903,6 +922,33 @@ if (BUILD_TESTING)
   endif()
 endif()
 
-if (BUILD_TESTING)
+if (BUILD_TESTING AND WIN32)
+  add_compile_options(-UNDEBUG)
+
+  add_executable(windows_shim_test tests/windows/shim_test.cpp)
+  add_test(NAME windows_shim_test COMMAND windows_shim_test)
+  set_tests_properties(windows_shim_test PROPERTIES LABELS "cpu;windows")
+
+  add_executable(continuation_disk_store_test
+    tests/cli/continuation_disk_store_test.cpp
+    src/cli/serve/continuation_disk_store.cpp
+    src/cli/serve/text_model_runner.cpp
+    src/cli/serve/continuation_cache.cpp)
+  target_link_libraries(continuation_disk_store_test PRIVATE gufo_logging gufo_core)
+  add_test(NAME continuation_disk_store_test
+    COMMAND continuation_disk_store_test)
+  set_tests_properties(continuation_disk_store_test PROPERTIES
+    LABELS "cpu;server;cache;disk;state;lifecycle")
+
+  add_executable(minimax_h3_media_test
+    tests/models/minimax_h3_media_test.cpp)
+  target_link_libraries(minimax_h3_media_test PRIVATE gufo_core)
+  add_test(NAME minimax_h3_media_test COMMAND minimax_h3_media_test)
+  set_tests_properties(minimax_h3_media_test PROPERTIES
+    LABELS "cpu;models;minimax-h3;video;audio;ffmpeg;mux;quality"
+    SKIP_RETURN_CODE 77)
+endif()
+
+if (BUILD_TESTING AND NOT WIN32)
   include(cmake/Checks.cmake)
 endif()

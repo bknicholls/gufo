@@ -35,6 +35,11 @@
 
 #include "src/core/crypto/sha256.hpp"
 
+#if defined(_WIN32)
+// Last: it maps the POSIX descriptor calls used below onto Win32 paths.
+#include "gufo_dirfd.h"
+#endif
+
 namespace gufo::server {
 namespace {
 
