@@ -1,11 +1,6 @@
 #include "src/models/minimax_h3/media.hpp"
 
 #include <errno.h>
-#include <fcntl.h>
-#include <poll.h>
-#include <signal.h>
-#include <spawn.h>
-#include <sys/wait.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -23,6 +18,8 @@
 #include <utility>
 #include <vector>
 
+#include "src/models/minimax_h3/media_process.hpp"
+
 #ifndef GUFO_FFMPEG_EXECUTABLE
 #define GUFO_FFMPEG_EXECUTABLE "ffmpeg"
 #endif
@@ -31,37 +28,11 @@
 #define GUFO_FFPROBE_EXECUTABLE "ffprobe"
 #endif
 
-// POSIX requires the process environment through a mutable-pointer ABI even
-// though posix_spawnp does not mutate it.
-extern char**
-    environ;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
-
 namespace gufo::minimax_h3 {
 namespace {
 
 constexpr std::size_t kIoChunkBytes = 4U << 20U;
 constexpr int kAudioChunkSamples = 4096;
-
-bool EnsureSigpipeIgnored(std::string* error) {
-  static std::once_flag once;
-  static int failure = 0;
-  std::call_once(once, [] {
-    struct sigaction ignore{};
-    ignore.sa_handler = SIG_IGN;
-    sigemptyset(&ignore.sa_mask);
-    if (sigaction(SIGPIPE, &ignore, nullptr) != 0) {
-      failure = errno;
-    }
-  });
-  if (failure == 0) {
-    return true;
-  }
-  if (error != nullptr) {
-    *error = "cannot ignore SIGPIPE for FFmpeg writers: " +
-             std::string(std::strerror(failure));
-  }
-  return false;
-}
 
 void SetError(std::string* error, std::string message) {
   if (error != nullptr) {
@@ -93,72 +64,6 @@ std::filesystem::path PartialMediaPath(
 
 bool IsCancelled(const CancellationToken* cancellation) {
   return cancellation != nullptr && cancellation->IsCancelled();
-}
-
-void CloseFd(int* descriptor) {
-  if (*descriptor >= 0) {
-    while (close(*descriptor) != 0 && errno == EINTR) {
-    }
-    *descriptor = -1;
-  }
-}
-
-bool MakeNonBlocking(int descriptor, std::string* error) {
-  const int flags = fcntl(descriptor, F_GETFL);
-  if (flags < 0 || fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) != 0) {
-    SetError(error, "cannot configure FFmpeg media pipe: " +
-                        std::string(std::strerror(errno)));
-    return false;
-  }
-  return true;
-}
-
-ssize_t CancellableWrite(int descriptor, const void* data, std::size_t bytes,
-                         const CancellationToken* cancellation,
-                         const std::atomic<bool>& stop) {
-  while (!stop.load(std::memory_order_acquire) && !IsCancelled(cancellation)) {
-    const ssize_t amount = write(descriptor, data, bytes);
-    if (amount >= 0) {
-      return amount;
-    }
-    if (errno == EINTR) {
-      continue;
-    }
-    if (errno != EAGAIN && errno != EWOULDBLOCK) {
-      return -1;
-    }
-    struct pollfd readiness{descriptor, POLLOUT, 0};
-    const int result = poll(&readiness, 1, 50);
-    if (result < 0 && errno != EINTR) {
-      return -1;
-    }
-    if (result > 0 && (readiness.revents & (POLLERR | POLLHUP | POLLNVAL))) {
-      errno = EPIPE;
-      return -1;
-    }
-  }
-  errno = ECANCELED;
-  return -1;
-}
-
-int AddCloseUnlessKept(posix_spawn_file_actions_t* actions, int descriptor,
-                       int keep_a, int keep_b) {
-  if (descriptor == keep_a || descriptor == keep_b) {
-    return 0;
-  }
-  return posix_spawn_file_actions_addclose(actions, descriptor);
-}
-
-bool WaitForChild(pid_t child, int* status, std::string* error) {
-  while (waitpid(child, status, 0) < 0) {
-    if (errno == EINTR) {
-      continue;
-    }
-    SetError(error, "cannot wait for media process: " +
-                        std::string(std::strerror(errno)));
-    return false;
-  }
-  return true;
 }
 
 bool ParseInteger(std::string_view text, int* output) {
@@ -207,78 +112,35 @@ bool ParseRate(std::string_view text, double* output) {
   return std::isfinite(*output);
 }
 
-std::vector<char*> MutableArgv(std::span<std::string> storage) {
-  std::vector<char*> arguments;
-  arguments.reserve(storage.size() + 1);
-  for (std::string& argument : storage) {
-    arguments.push_back(argument.data());
-  }
-  arguments.push_back(nullptr);
-  return arguments;
-}
-
-bool RunCapture(const char* program, std::vector<std::string> storage,
+bool RunCapture(const char* program, std::vector<std::string> arguments,
                 std::string* output, std::string* error) {
-  std::vector<char*> arguments = MutableArgv(storage);
-  int stream[2] = {-1, -1};
-  if (pipe(stream) != 0) {
-    SetError(error, "cannot create media inspection pipe: " +
-                        std::string(std::strerror(errno)));
-    return false;
-  }
-  posix_spawn_file_actions_t actions;
-  int code = posix_spawn_file_actions_init(&actions);
-  if (code == 0) {
-    code = posix_spawn_file_actions_adddup2(&actions, stream[1], STDOUT_FILENO);
-  }
-  if (code == 0) {
-    code = posix_spawn_file_actions_addclose(&actions, stream[0]);
-  }
-  if (code == 0) {
-    code = posix_spawn_file_actions_addclose(&actions, stream[1]);
-  }
-  pid_t child = -1;
-  if (code == 0) {
-    code = posix_spawnp(&child, program, &actions, nullptr, arguments.data(),
-                        environ);
-  }
-  (void)posix_spawn_file_actions_destroy(&actions);
-  CloseFd(&stream[1]);
-  if (code != 0) {
-    CloseFd(&stream[0]);
-    SetError(error, "cannot start " + std::string(program) + ": " +
-                        std::string(std::strerror(code)));
+  MediaProcess child;
+  if (!child.StartCapture(program, std::move(arguments), program, error)) {
     return false;
   }
   output->clear();
   std::array<char, 4096> buffer{};
   while (true) {
-    const ssize_t amount = read(stream[0], buffer.data(), buffer.size());
-    if (amount < 0 && errno == EINTR) {
-      continue;
-    }
+    const long amount = child.Read(buffer.data(), buffer.size());
     if (amount <= 0) {
       break;
     }
     if (output->size() + static_cast<std::size_t>(amount) > (1U << 20U)) {
-      CloseFd(&stream[0]);
-      (void)kill(child, SIGTERM);
+      child.Terminate();
       int ignored = 0;
-      (void)WaitForChild(child, &ignored, nullptr);
+      (void)child.Wait(&ignored, nullptr);
       SetError(error, "media inspection output exceeded 1 MiB");
       return false;
     }
     output->append(buffer.data(), static_cast<std::size_t>(amount));
   }
-  CloseFd(&stream[0]);
-  int status = 0;
-  if (!WaitForChild(child, &status, error)) {
+  int exit_code = 0;
+  if (!child.Wait(&exit_code, error)) {
     return false;
   }
-  if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-    SetError(error,
-             std::string(program) + " exited with status " +
-                 std::to_string(WIFEXITED(status) ? WEXITSTATUS(status) : -1));
+  if (exit_code != 0) {
+    SetError(error, std::string(program) + " exited with status " +
+                        std::to_string(exit_code));
     return false;
   }
   return true;
@@ -370,21 +232,6 @@ bool WriteSynchronizedMp4(const std::filesystem::path& path,
   std::filesystem::remove(partial_path, filesystem_error);
   filesystem_error.clear();
 
-  int video_pipe[2] = {-1, -1};
-  int audio_pipe[2] = {-1, -1};
-  if (pipe(video_pipe) != 0 || pipe(audio_pipe) != 0) {
-    const int saved = errno;
-    CloseFd(&video_pipe[0]);
-    CloseFd(&video_pipe[1]);
-    CloseFd(&audio_pipe[0]);
-    CloseFd(&audio_pipe[1]);
-    SetError(error, "cannot create FFmpeg media pipes: " +
-                        std::string(std::strerror(saved)));
-    return false;
-  }
-  const int audio_target =
-      std::max({video_pipe[0], video_pipe[1], audio_pipe[0], audio_pipe[1]}) +
-      1;
   const std::string size = std::to_string(video.input_width) + "x" +
                            std::to_string(video.input_height);
   const std::string output_size = std::to_string(video.output_width) + ":" +
@@ -392,7 +239,6 @@ bool WriteSynchronizedMp4(const std::filesystem::path& path,
   const std::string rate = std::to_string(video.fps);
   const std::string audio_rate = std::to_string(sample_rate);
   const std::string audio_channels = std::to_string(channels);
-  const std::string audio_input = "pipe:" + std::to_string(audio_target);
   const std::string output_path = partial_path.string();
   std::vector<std::string> argument_storage = {
       "ffmpeg",
@@ -416,7 +262,7 @@ bool WriteSynchronizedMp4(const std::filesystem::path& path,
       "-ac",
       audio_channels,
       "-i",
-      audio_input,
+      std::string(MediaProcess::kSecondaryInputUrl),
       "-map",
       "0:v:0",
       "-map",
@@ -439,47 +285,9 @@ bool WriteSynchronizedMp4(const std::filesystem::path& path,
       "+faststart",
       output_path,
   };
-  std::vector<char*> arguments = MutableArgv(argument_storage);
-  posix_spawn_file_actions_t actions;
-  int code = posix_spawn_file_actions_init(&actions);
-  if (code == 0) {
-    code =
-        posix_spawn_file_actions_adddup2(&actions, video_pipe[0], STDIN_FILENO);
-  }
-  if (code == 0) {
-    code =
-        posix_spawn_file_actions_adddup2(&actions, audio_pipe[0], audio_target);
-  }
-  const std::array<int, 4> descriptors = {video_pipe[0], video_pipe[1],
-                                          audio_pipe[0], audio_pipe[1]};
-  for (const int descriptor : descriptors) {
-    if (code == 0) {
-      code =
-          AddCloseUnlessKept(&actions, descriptor, STDIN_FILENO, audio_target);
-    }
-  }
-  pid_t child = -1;
-  if (code == 0) {
-    code = posix_spawnp(&child, FfmpegProgram(), &actions, nullptr,
-                        arguments.data(), environ);
-  }
-  (void)posix_spawn_file_actions_destroy(&actions);
-  CloseFd(&video_pipe[0]);
-  CloseFd(&audio_pipe[0]);
-  if (code != 0) {
-    CloseFd(&video_pipe[1]);
-    CloseFd(&audio_pipe[1]);
-    std::filesystem::remove(partial_path, filesystem_error);
-    SetError(error, "cannot start FFmpeg: " + std::string(std::strerror(code)));
-    return false;
-  }
-  if (!MakeNonBlocking(video_pipe[1], error) ||
-      !MakeNonBlocking(audio_pipe[1], error)) {
-    CloseFd(&video_pipe[1]);
-    CloseFd(&audio_pipe[1]);
-    (void)kill(child, SIGTERM);
-    int ignored = 0;
-    (void)WaitForChild(child, &ignored, nullptr);
+  MediaProcess child;
+  if (!child.StartWithInputs(FfmpegProgram(), std::move(argument_storage),
+                             "FFmpeg", error)) {
     std::filesystem::remove(partial_path, filesystem_error);
     return false;
   }
@@ -490,15 +298,6 @@ bool WriteSynchronizedMp4(const std::filesystem::path& path,
   std::uint64_t written_video = 0;
   std::uint64_t written_audio = 0;
   std::size_t maximum_audio_staging = 0;
-  if (!EnsureSigpipeIgnored(error)) {
-    CloseFd(&video_pipe[1]);
-    CloseFd(&audio_pipe[1]);
-    (void)kill(child, SIGTERM);
-    int ignored = 0;
-    (void)WaitForChild(child, &ignored, nullptr);
-    std::filesystem::remove(partial_path, filesystem_error);
-    return false;
-  }
 
   std::thread video_thread([&] {
     const std::uint8_t* cursor = rgb24.data();
@@ -509,8 +308,8 @@ bool WriteSynchronizedMp4(const std::filesystem::path& path,
         break;
       }
       const std::size_t request = std::min(remaining, kIoChunkBytes);
-      const ssize_t amount =
-          CancellableWrite(video_pipe[1], cursor, request, cancellation, stop);
+      const long amount = child.Write(MediaProcess::Input::kPrimary, cursor,
+                                      request, cancellation, stop);
       if (amount <= 0) {
         if (!IsCancelled(cancellation) &&
             !stop.load(std::memory_order_acquire)) {
@@ -524,7 +323,8 @@ bool WriteSynchronizedMp4(const std::filesystem::path& path,
       remaining -= static_cast<std::size_t>(amount);
       written_video += static_cast<std::uint64_t>(amount);
     }
-    CloseFd(&video_pipe[1]);
+    child.CloseInput(MediaProcess::Input::kPrimary,
+                     remaining == 0 && !stop.load(std::memory_order_acquire));
   });
   std::thread audio_thread([&] {
     std::vector<float> interleaved(
@@ -549,8 +349,8 @@ bool WriteSynchronizedMp4(const std::filesystem::path& path,
       std::size_t remaining =
           static_cast<std::size_t>(chunk) * channels * sizeof(float);
       while (remaining != 0 && !stop.load(std::memory_order_acquire)) {
-        const ssize_t amount = CancellableWrite(audio_pipe[1], cursor,
-                                                remaining, cancellation, stop);
+        const long amount = child.Write(MediaProcess::Input::kSecondary, cursor,
+                                        remaining, cancellation, stop);
         if (amount <= 0) {
           if (!IsCancelled(cancellation) &&
               !stop.load(std::memory_order_acquire)) {
@@ -566,23 +366,24 @@ bool WriteSynchronizedMp4(const std::filesystem::path& path,
       }
       offset += chunk;
     }
-    CloseFd(&audio_pipe[1]);
+    child.CloseInput(
+        MediaProcess::Input::kSecondary,
+        offset >= samples && !stop.load(std::memory_order_acquire));
   });
   video_thread.join();
   audio_thread.join();
 
   const bool cancelled = IsCancelled(cancellation);
   if (stop.load(std::memory_order_acquire) || cancelled) {
-    (void)kill(child, SIGTERM);
+    child.Terminate();
   }
-  int status = 0;
-  const bool waited = WaitForChild(child, &status, error);
+  int exit_code = -1;
+  const bool waited = child.Wait(&exit_code, error);
   if (telemetry != nullptr) {
     telemetry->video_bytes = written_video;
     telemetry->audio_bytes = written_audio;
     telemetry->maximum_audio_staging_bytes = maximum_audio_staging;
-    telemetry->child_status =
-        waited && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    telemetry->child_status = waited ? exit_code : -1;
     telemetry->cancelled = cancelled;
   }
   if (!waited) {
@@ -603,11 +404,9 @@ bool WriteSynchronizedMp4(const std::filesystem::path& path,
                         std::string(std::strerror(writer_error)));
     return false;
   }
-  if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+  if (exit_code != 0) {
     std::filesystem::remove(partial_path, filesystem_error);
-    SetError(error,
-             "FFmpeg exited with status " +
-                 std::to_string(WIFEXITED(status) ? WEXITSTATUS(status) : -1));
+    SetError(error, "FFmpeg exited with status " + std::to_string(exit_code));
     return false;
   }
   if (written_video != video_bytes ||
