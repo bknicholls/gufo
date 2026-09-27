@@ -215,6 +215,40 @@ void TestSnapshotCanBranchIntoTwoIndependentStateSlots() {
   root_again.Invalidate();
 }
 
+void TestRetainedSnapshotsListMostRecentFirst() {
+  using Tokens = std::vector<gufo::server::ContinuationToken>;
+  std::vector<std::size_t> invalidations(2);
+  std::size_t next_id = 0;
+  gufo::server::ContinuationCache cache(
+      2, [&] { return std::make_unique<FakeState>(next_id++, &invalidations); },
+      {
+          .restore = [](gufo::server::ContinuationState&,
+                        const gufo::server::ContinuationSnapshot&) {},
+          .capacity_bytes = [] { return 1024; },
+          .on_event = {},
+      });
+  for (const Tokens& tokens : {Tokens{1, 2}, Tokens{3, 4}}) {
+    auto lease = cache.Acquire(tokens);
+    Expect(lease.TryReserveSnapshot(sizeof(std::size_t), tokens.size()),
+           "snapshot reserves capacity");
+    lease.Commit(tokens, std::make_unique<FakeSnapshot>(tokens.front()));
+  }
+  auto retained = cache.RetainedSnapshots();
+  Expect(retained.size() == 2 && retained[0].tokens == Tokens{3, 4} &&
+             retained[1].tokens == Tokens{1, 2},
+         "retained snapshots list the most recently used first");
+  Expect(dynamic_cast<const FakeSnapshot&>(*retained[0].snapshot).value == 3,
+         "each entry carries its snapshot");
+  {
+    auto lease = cache.Acquire(Tokens{1, 2, 9});
+    Expect(lease.cache_hit(), "the older snapshot is restored");
+    lease.Invalidate();
+  }
+  retained = cache.RetainedSnapshots();
+  Expect(retained.size() == 2 && retained[0].tokens == Tokens{1, 2},
+         "a restored snapshot becomes the most recently used");
+}
+
 void TestByteCapacityEvictsBeforeSnapshotAllocation() {
   using gufo::server::SnapshotEventAction;
   using gufo::server::SnapshotEventReason;
@@ -527,6 +561,7 @@ int main() {
   TestLongestAvailablePrefixWins();
   TestWaitingAcquireCanBeCancelled();
   TestSnapshotCanBranchIntoTwoIndependentStateSlots();
+  TestRetainedSnapshotsListMostRecentFirst();
   TestByteCapacityEvictsBeforeSnapshotAllocation();
   TestConcurrentReservationsCannotOvercommitBudget();
   TestImpossibleReservationPreservesRetainedEntries();

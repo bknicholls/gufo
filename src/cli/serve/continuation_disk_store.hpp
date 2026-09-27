@@ -73,6 +73,9 @@ enum class ContinuationDiskSaveKind : std::uint8_t {
   kContinuation,
   /// A prefix shared across conversations, learned from earlier prompts.
   kSharedPrefix,
+  /// A continuation kept in memory, persisted as the server stops so a
+  /// restarted server resumes it. Stored even with shared_prefix_only.
+  kRetained,
 };
 
 /// Restart-safe, provider-neutral exact-prefix snapshot store.

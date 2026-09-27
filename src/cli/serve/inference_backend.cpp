@@ -3324,6 +3324,17 @@ bool InferenceBackend::load(
 }
 #endif
 
+std::size_t InferenceBackend::persist_retained_continuations() {
+#if defined(ENGINE_ENABLE_HIP)
+  const auto state = impl_->Snapshot();
+  return state != nullptr && state->scheduler != nullptr
+             ? state->scheduler->PersistRetainedContinuations()
+             : 0;
+#else
+  return 0;
+#endif
+}
+
 std::string InferenceBackend::model_id() const {
 #if defined(ENGINE_ENABLE_HIP)
   const auto state = impl_->Snapshot();

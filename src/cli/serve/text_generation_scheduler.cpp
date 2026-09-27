@@ -1333,6 +1333,10 @@ std::size_t TextGenerationScheduler::max_buffered_output_bytes()
       std::memory_order_relaxed);
 }
 
+std::size_t TextGenerationScheduler::PersistRetainedContinuations() {
+  return impl_->runner_pool->PersistRetainedContinuations();
+}
+
 TextGenerationScheduler::Request TextGenerationScheduler::Submit(
     std::vector<TextRunnerToken> prompt, std::size_t max_tokens,
     const sampling::SamplingConfig& sampling,

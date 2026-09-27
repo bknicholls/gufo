@@ -970,6 +970,26 @@ void TestSharedPrefixOnlyPersistsSharedPrefixes() {
          "only the shared prefix reaches disk");
 }
 
+void TestRetainedContinuationsSurviveRestart() {
+  TemporaryDirectory directory;
+  auto runner = std::make_shared<FakeRunner>("retained-on-stop");
+  auto options = StoreOptions(directory.path());
+  options.shared_prefix_only = true;
+  {
+    ContinuationDiskStore store(options);
+    Expect(store.SaveAsync(runner, {5, 6, 7}, MakeSnapshot(*runner, 21, 3), {},
+                           {}, ContinuationDiskSaveKind::kRetained) != 0,
+           "a continuation retained at shutdown is persisted in "
+           "shared-prefix-only mode");
+  }
+  ContinuationDiskStore restarted(options);
+  auto state = runner->CreateState();
+  const auto restored = RestoreTokens(restarted, *runner, *state, {5, 6, 7, 8});
+  Expect(restored.restored && restored.token_count == 3 &&
+             RequireFakeState(*state).value == 21,
+         "a restarted server resumes the retained continuation");
+}
+
 void TestBoundedAsyncPersistenceDoesNotBlockLookup() {
   TemporaryDirectory directory;
   auto runner = std::make_shared<FakeRunner>("async-store");
@@ -1138,6 +1158,7 @@ int main() {
   TestImageIdentitySurvivesRestart();
   TestSharedPrefixBoundariesAndExactDedup();
   TestSharedPrefixOnlyPersistsSharedPrefixes();
+  TestRetainedContinuationsSurviveRestart();
   TestSha256KnownVector();
   TestRestartRestoreAndCompatibilityIdentity();
   TestLongestPrefixAndForcedHashCollision();

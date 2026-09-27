@@ -115,6 +115,9 @@ public:
 
   /// Stable model identifier used in API responses.
   [[nodiscard]] std::string model_id() const override;
+  /// Writes the continuations kept in memory to the disk cache, for a server
+  /// about to stop or unload. Returns how many were queued.
+  std::size_t persist_retained_continuations();
   [[nodiscard]] bool ready() const override;
   [[nodiscard]] SamplingDefaults sampling_defaults() const override;
   [[nodiscard]] std::uint32_t max_context() const;

@@ -117,6 +117,9 @@ public:
   [[nodiscard]] std::size_t buffered_output_bytes() const noexcept;
   [[nodiscard]] std::size_t max_buffered_output_bytes() const noexcept;
 
+  /// See TextRunnerPool::PersistRetainedContinuations.
+  std::size_t PersistRetainedContinuations();
+
   [[nodiscard]] Request Submit(std::vector<TextRunnerToken> prompt,
                                std::size_t max_tokens,
                                const sampling::SamplingConfig& sampling,

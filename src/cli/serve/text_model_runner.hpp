@@ -405,6 +405,12 @@ public:
 
   [[nodiscard]] const TextModelRunner& runner() const noexcept;
   [[nodiscard]] std::size_t capacity() const noexcept;
+
+  /// Writes the continuations kept in memory to the disk cache and waits for
+  /// the writes, so a restarted server can resume them. Returns how many were
+  /// queued; zero without a disk cache.
+  std::size_t PersistRetainedContinuations();
+
   [[nodiscard]] TextExecutionPlan SelectDecodePlan(
       std::size_t ready_requests) const;
   [[nodiscard]] std::vector<TextDecodeStep> DecodeBatch(

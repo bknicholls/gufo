@@ -432,6 +432,30 @@ std::size_t ContinuationCache::reserved_snapshot_bytes() const noexcept {
   return impl_->reserved_snapshot_bytes;
 }
 
+std::vector<ContinuationCache::RetainedSnapshot>
+ContinuationCache::RetainedSnapshots() const {
+  std::vector<std::pair<std::uint64_t, RetainedSnapshot>> retained;
+  {
+    const std::lock_guard<std::mutex> lock(impl_->mutex);
+    for (const auto& entry : impl_->entries) {
+      if (entry->snapshot == nullptr || entry->tokens.empty())
+        continue;
+      retained.push_back({entry->snapshot_last_used,
+                          {.tokens = entry->tokens,
+                           .snapshot = entry->snapshot,
+                           .input_identity = entry->input_identity}});
+    }
+  }
+  std::ranges::sort(retained, [](const auto& lhs, const auto& rhs) {
+    return lhs.first > rhs.first;
+  });
+  std::vector<RetainedSnapshot> ordered;
+  ordered.reserve(retained.size());
+  for (auto& [last_used, snapshot] : retained)
+    ordered.push_back(std::move(snapshot));
+  return ordered;
+}
+
 ContinuationState& ContinuationCache::StateAt(std::size_t index) {
   return *impl_->entries.at(index)->state;
 }

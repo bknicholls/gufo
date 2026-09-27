@@ -1146,6 +1146,30 @@ std::size_t TextRunnerPool::capacity() const noexcept {
   return impl_->cache.capacity();
 }
 
+std::size_t TextRunnerPool::PersistRetainedContinuations() {
+  if (impl_->disk_store == nullptr)
+    return 0;
+  std::size_t queued = 0;
+  for (auto& retained : impl_->cache.RetainedSnapshots()) {
+    auto snapshot =
+        std::dynamic_pointer_cast<const TextRunnerSnapshot>(retained.snapshot);
+    if (snapshot == nullptr)
+      continue;
+    try {
+      if (impl_->disk_store->SaveAsync(
+              impl_->validated.runner, std::move(retained.tokens),
+              std::move(snapshot), std::move(retained.input_identity), {},
+              ContinuationDiskSaveKind::kRetained) != 0)
+        ++queued;
+    } catch (...) {
+      // Best effort: a continuation that is not saved only costs a longer
+      // resume after the restart.
+    }
+  }
+  impl_->disk_store->Flush();
+  return queued;
+}
+
 TextExecutionPlan TextRunnerPool::SelectDecodePlan(
     std::size_t ready_requests) const {
   if (ready_requests == 0) {

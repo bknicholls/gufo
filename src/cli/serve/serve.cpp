@@ -577,6 +577,11 @@ void PrintServeHelp(std::string_view program_name,
     parser.AddFlag("", "--cache-disk-shared-prefix-only",
                    "Persist only prefixes shared across conversations", "Cache",
                    &cache_disk_shared_prefix_only);
+    bool cache_disk_persist_on_stop = false;
+    parser.AddFlag("", "--cache-disk-persist-on-stop",
+                   "Persist the conversations held in memory when the server "
+                   "stops, so a restart resumes them",
+                   "Cache", &cache_disk_persist_on_stop);
     std::uint64_t idle_timeout_seconds = 0;
     parser.AddOption("", "--idle-timeout", "SEC",
                      "Exit after SEC seconds without a request; 0 never "
@@ -663,6 +668,7 @@ int RunServe(std::span<const char* const> args) {
   std::string api_key;
   bool verbose = false;
   std::uint64_t idle_timeout_seconds = 0;
+  bool cache_disk_persist_on_stop = false;
 
   // Identify the modality only after leading server options. The selected
   // parser consumes every option together, so --served-model-name -v and
@@ -1040,6 +1046,10 @@ int RunServe(std::span<const char* const> args) {
     llm_parser.AddFlag("", "--cache-disk-shared-prefix-only",
                        "Persist only prefixes shared across conversations",
                        "Cache", &cache_disk_shared_prefix_only);
+    llm_parser.AddFlag("", "--cache-disk-persist-on-stop",
+                       "Persist the conversations held in memory when the "
+                       "server stops, so a restart resumes them",
+                       "Cache", &cache_disk_persist_on_stop);
     llm_parser.AddOption("", "--idle-timeout", "SEC",
                          "Exit after SEC seconds without a request; 0 never "
                          "(default: 0)",
@@ -1069,6 +1079,7 @@ int RunServe(std::span<const char* const> args) {
         prefill_chunk_tokens == 0 ||
         prefill_batch_tokens < server::kMinMaxPrefillBatchTokens ||
         prefill_batch_tokens > server::kDefaultMaxPrefillBatchTokens ||
+        (cache_disk_persist_on_stop && cache_disk_directory.empty()) ||
         max_pending_requests == 0 || max_pending_requests_per_client == 0 ||
         max_pending_requests_per_client > max_pending_requests ||
         max_output_bytes == 0 || max_buffered_output_bytes == 0 ||
@@ -1210,6 +1221,15 @@ int RunServe(std::span<const char* const> args) {
     return 1;
   }
   server.run(/*handle_signals=*/true);
+  // A server stopped by a signal or for idleness restarts on the next
+  // request; persisting the conversations it holds lets that restart resume
+  // them from disk.
+  if (cache_disk_persist_on_stop && backend != nullptr) {
+    const auto persisted = backend->persist_retained_continuations();
+    if (persisted != 0)
+      server::Logger::Info("cache", "event=persisted_on_stop continuations=" +
+                                        std::to_string(persisted));
+  }
   return 0;
 }
 

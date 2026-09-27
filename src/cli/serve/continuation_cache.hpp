@@ -201,6 +201,15 @@ public:
   [[nodiscard]] std::size_t retained_snapshot_bytes() const noexcept;
   [[nodiscard]] std::size_t reserved_snapshot_bytes() const noexcept;
 
+  struct RetainedSnapshot {
+    std::vector<ContinuationToken> tokens;
+    std::shared_ptr<const ContinuationSnapshot> snapshot;
+    std::vector<std::uint8_t> input_identity;
+  };
+
+  /// The snapshots currently retained, most recently used first.
+  [[nodiscard]] std::vector<RetainedSnapshot> RetainedSnapshots() const;
+
 private:
   struct Entry;
 

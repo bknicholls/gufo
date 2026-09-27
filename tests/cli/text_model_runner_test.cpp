@@ -886,6 +886,33 @@ void TestPersistentSnapshotRestoresAcrossPools() {
   miss.Invalidate();
 }
 
+void TestRetainedContinuationsPersistForRestart() {
+  TemporaryDirectory directory;
+  const TextRunnerDiskCacheOptions disk_cache{
+      .directory = directory.path(),
+      .capacity_bytes = 4096,
+      .staging_capacity_bytes = 4096,
+      .shared_prefix_only = true,
+  };
+  auto stats = std::make_shared<FakeStats>();
+  auto runner = std::make_shared<PersistentSnapshotRunner>(stats, "artifact-A");
+  {
+    TextRunnerPool pool(runner, 1, disk_cache);
+    auto request = pool.Acquire({1, 2, 3});
+    Expect(request.Prefill(3).decode_ready, "conversation reaches decode");
+    const auto commit = request.Commit();
+    Expect(commit.disk_queued_bytes == 0,
+           "shared-prefix-only mode keeps the conversation in memory only");
+    Expect(pool.PersistRetainedContinuations() == 1,
+           "the retained conversation is written for a restart");
+  }
+  TextRunnerPool restarted(runner, 1, disk_cache);
+  auto resumed = restarted.Acquire({1, 2, 3, 4});
+  Expect(resumed.cache_disk_hit() && resumed.cached_prompt_tokens() == 3,
+         "a restarted pool resumes the persisted conversation");
+  resumed.Invalidate();
+}
+
 void TestPromptReuseCanBeDisabledPerRequest() {
   auto stats = std::make_shared<FakeStats>();
   TextRunnerPool pool(std::make_shared<SnapshotRunner>(stats), 1);
@@ -1218,6 +1245,7 @@ int main() {
   TestPersistentSnapshotRestoresAcrossPools();
   TestSharedPrefixIsLearnedAndRestoredAcrossConversations();
   TestSharedPrefixOnlyPersistsOnlySharedPrefixes();
+  TestRetainedContinuationsPersistForRestart();
   TestMeasuredStateIsReconciledWithClaim();
   TestSnapshotBudgetRefusalDoesNotFailCompletedRequest();
   std::ostringstream failure_log;
