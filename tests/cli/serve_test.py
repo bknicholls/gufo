@@ -60,6 +60,7 @@ def main():
     assert "Path to GGUF model file (required)" in help_text
     assert "8589934592" in help_text
     assert "0 = auto, at most 1 GiB and 1/8 available RAM" in help_text
+    assert "--prefill-batch" in help_text
     check(["bench", "--help"], 0, "Path to GGUF model file (required)")
     for args in (["serve"], ["serve", "llm"], ["bench"],
                  ["serve", "llm", "--model", ""], ["bench", "--model", ""]):
@@ -82,6 +83,11 @@ def main():
     check(["serve", "llm", "--cache-disk", "/unused-cache",
            "--cache-disk-bytes", "0"], 2,
           "sampling and scheduling limits are invalid")
+    for batch in ("512", "8192"):
+        check(["serve", "llm", "--prefill-batch", batch], 2,
+              "sampling and scheduling limits are invalid")
+    check(["serve", "llm", "--model", "missing.gguf", "--prefill-batch",
+           "1024"], 1, "Error loading model")
 
     for command in ("prompt", "chat", "bench"):
         check([command, "--help"], 0, "--draft-policy")

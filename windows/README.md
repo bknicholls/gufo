@@ -81,3 +81,7 @@ verified on Windows.
   device memory cached, so each request's snapshot buffers ratchet the
   process up by several GB. With it set, the server stays at its post-load
   size plus one retained snapshot.
+- `serve llm --prefill-batch 1024` sizes each session's prefill scratch for
+  1024-token batches instead of 4096. That saves ~1.5 GB for ~2% prefill
+  throughput. 1024 is the minimum, the smallest batch the fp16 prefill route
+  runs on.

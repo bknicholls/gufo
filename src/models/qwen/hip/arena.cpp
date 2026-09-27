@@ -18,7 +18,10 @@
 namespace gufo::hip {
 namespace {
 
-constexpr std::uint32_t kMaxPromptBatch = 4096;
+std::uint32_t MaxPromptBatch(const QwenExecutionPolicy& policy) noexcept {
+  return std::clamp(policy.max_prompt_batch, kMinQwenMaxPromptBatch,
+                    kDefaultQwenMaxPromptBatch);
+}
 constexpr std::size_t kMaxTargetLayerTaps = 5;
 constexpr std::array<std::uint8_t, 8> kCompactSnapshotMagic = {
     'G', 'Q', 'K', 'V', 'S', 'N', 'P', '1'};
@@ -337,7 +340,8 @@ QwenGpuMemoryUsage QwenGpuArena::EstimateMemoryUsage(
     const core::ModelConfig& config, std::uint32_t max_context,
     QwenExecutionPolicy policy) {
   const std::size_t context = std::max(max_context, 1U);
-  const std::size_t batch = std::min<std::size_t>(context, kMaxPromptBatch);
+  const std::size_t batch =
+      std::min<std::size_t>(context, MaxPromptBatch(policy));
   const std::size_t hidden = config.hidden_size;
   const std::size_t intermediate = config.intermediate_size;
   const std::size_t attention = config.AttentionSize();
@@ -693,7 +697,7 @@ QwenGpuArena::QwenGpuArena(const core::ModelConfig& config,
                            QwenExecutionPolicy policy)
     : config_(config),
       max_context_(std::max(max_context, 1U)),
-      max_batch_(std::min(max_context_, kMaxPromptBatch)),
+      max_batch_(std::min(max_context_, MaxPromptBatch(policy))),
       policy_(policy) {
   try {
     snapshot_buffers_ =

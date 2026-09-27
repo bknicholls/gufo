@@ -537,6 +537,11 @@ void PrintServeHelp(std::string_view program_name,
         "", "--prefill-chunk", "N",
         "Maximum prompt tokens between active decode rounds (default: 512)",
         "Scheduling", &prefill_chunk_tokens);
+    std::size_t prefill_batch_tokens = server::kDefaultMaxPrefillBatchTokens;
+    parser.AddOption("", "--prefill-batch", "N",
+                     "Maximum prompt tokens per prefill pass; sizes each "
+                     "session's scratch memory (default: 4096, minimum: 1024)",
+                     "Scheduling", &prefill_batch_tokens);
     parser.AddOption("", "--max-pending", "N",
                      "Maximum queued generation requests (default: 16)",
                      "Scheduling", &max_pending_requests);
@@ -981,6 +986,12 @@ int RunServe(std::span<const char* const> args) {
         "", "--prefill-chunk", "N",
         "Maximum prompt tokens between active decode rounds (default: 512)",
         "Scheduling", &prefill_chunk_tokens);
+    std::size_t prefill_batch_tokens = server::kDefaultMaxPrefillBatchTokens;
+    llm_parser.AddOption("", "--prefill-batch", "N",
+                         "Maximum prompt tokens per prefill pass; sizes each "
+                         "session's scratch memory (default: 4096, minimum: "
+                         "1024)",
+                         "Scheduling", &prefill_batch_tokens);
     llm_parser.AddOption("", "--max-pending", "N",
                          "Maximum queued generation requests (default: 16)",
                          "Scheduling", &max_pending_requests);
@@ -1037,8 +1048,10 @@ int RunServe(std::span<const char* const> args) {
     }
     if (max_tokens < -1 || max_tokens == 0 ||
         max_tokens > std::numeric_limits<std::uint32_t>::max() ||
-        prefill_chunk_tokens == 0 || max_pending_requests == 0 ||
-        max_pending_requests_per_client == 0 ||
+        prefill_chunk_tokens == 0 ||
+        prefill_batch_tokens < server::kMinMaxPrefillBatchTokens ||
+        prefill_batch_tokens > server::kDefaultMaxPrefillBatchTokens ||
+        max_pending_requests == 0 || max_pending_requests_per_client == 0 ||
         max_pending_requests_per_client > max_pending_requests ||
         max_output_bytes == 0 || max_buffered_output_bytes == 0 ||
         max_buffered_output_bytes_total == 0 ||
@@ -1115,6 +1128,7 @@ int RunServe(std::span<const char* const> args) {
     if (!backend->load(model, &err, max_context, session_count,
                        server::TextPrefillPolicy{
                            .decode_active_tokens = prefill_chunk_tokens,
+                           .max_batch_tokens = prefill_batch_tokens,
                        },
                        server::TextSchedulerPolicy{
                            .max_pending_requests = max_pending_requests,

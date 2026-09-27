@@ -32,8 +32,15 @@ inline constexpr std::size_t kDefaultMaxBufferedOutputBytes =
 inline constexpr std::size_t kDefaultMaxBufferedOutputBytesTotal =
     static_cast<std::size_t>(256) * 1024;
 
+// Prompt tokens one prefill pass may hold. It sizes every session's
+// activation scratch, so lowering it trades prefill batch width for memory.
+// The floor keeps batches wide enough for the models' batched prefill routes.
+inline constexpr std::size_t kDefaultMaxPrefillBatchTokens = 4096;
+inline constexpr std::size_t kMinMaxPrefillBatchTokens = 1024;
+
 struct TextPrefillPolicy {
   std::size_t decode_active_tokens{kDefaultDecodeActivePrefillTokens};
+  std::size_t max_batch_tokens{kDefaultMaxPrefillBatchTokens};
 };
 
 struct TextSchedulerPolicy {

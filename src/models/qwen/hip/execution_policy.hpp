@@ -29,11 +29,19 @@ enum class QwenExecutionMode : std::uint8_t {
   kPrefill,
 };
 
+// Prompt tokens one prefill pass may hold; it sizes each session's activation
+// scratch. Prefill is chunked with a fixed reduction order, so this changes
+// memory and throughput, never results. The floor keeps the fp16 prefill
+// route, which needs 1024-token batches.
+inline constexpr std::uint32_t kDefaultQwenMaxPromptBatch = 4096;
+inline constexpr std::uint32_t kMinQwenMaxPromptBatch = 1024;
+
 struct QwenExecutionPolicy {
   bool fuse_qk_norm_rope_kv{true};
   QwenKvCacheStorage kv_cache_storage{QwenKvCacheStorage::kFp16};
   QwenRecurrentStateStorage recurrent_state_storage{
       QwenRecurrentStateStorage::kFp32};
+  std::uint32_t max_prompt_batch{kDefaultQwenMaxPromptBatch};
 
   [[nodiscard]] static constexpr QwenExecutionPolicy Production() noexcept {
     return {};

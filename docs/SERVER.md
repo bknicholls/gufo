@@ -143,6 +143,10 @@ work can batch across ready requests. See the
 
 Each model chooses its prefill chunk. `--prefill-chunk` limits prompt work
 between active decode rounds without changing a lone request's kernel policy.
+`--prefill-batch N` (1024 to 4096, default 4096) caps the prompt tokens one
+Qwen prefill batch processes. The prefill scratch buffers scale with it, so a
+smaller batch trades prompt throughput for memory on hosts where the GPU shares
+system RAM.
 
 Prompt reuse is enabled by default. `cache_prompt: false` on
 `/v1/chat/completions` bypasses both memory and disk lookup for that request;
