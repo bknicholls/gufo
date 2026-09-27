@@ -24,6 +24,7 @@
 #include <hipblas/hipblas.h>
 
 #include "src/core/hip/detail/hip_graph_decode_executor.hpp"
+#include "src/core/hip/device_buffer_pool.hpp"
 #include "src/models/qwen/hip/execution_policy.hpp"
 #include "src/models/qwen/hip/ops/gemm.hpp"
 #include "src/models/qwen/hip/ops/ssm.hpp"
@@ -156,6 +157,10 @@ private:
   void* d_kv_f16_{nullptr};
   void* d_ssm_conv_{nullptr};
   void* d_ssm_deltanet_{nullptr};
+  std::shared_ptr<DeviceBufferPool> buffer_pool_;
+  std::size_t kv_capacity_{0};
+  std::size_t conv_capacity_{0};
+  std::size_t deltanet_capacity_{0};
   std::size_t kv_elements_per_plane_{0};
   std::size_t conv_elements_{0};
   std::size_t deltanet_elements_{0};
@@ -366,6 +371,7 @@ private:
   std::size_t replay_captured_positions_{0};
   bool has_saved_state_{false};
   bool replay_capture_active_{false};
+  std::shared_ptr<DeviceBufferPool> snapshot_buffers_;
 };
 
 /// End-to-end GPU model executor running directly on the gfx1151 RDNA 3.5 CUs.

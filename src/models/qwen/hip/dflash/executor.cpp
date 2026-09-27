@@ -28,6 +28,12 @@ constexpr std::array<std::uint8_t, 8> kDFlashGpuPersistentMagic = {
 constexpr std::uint32_t kDFlashGpuPersistentVersion = 2;
 constexpr std::size_t kDFlashGpuPersistentHeaderBytes = 64;
 
+enum DFlashSnapshotBufferSlot : std::size_t {
+  kDFlashSnapshotKSlot,
+  kDFlashSnapshotVSlot,
+  kDFlashSnapshotBufferSlots,
+};
+
 template<typename T>
   requires(std::is_unsigned_v<T>)
 void PutLittleEndian(std::span<std::uint8_t> destination, std::size_t offset,
@@ -120,12 +126,10 @@ void TraceTensor(const DFlashTrace& trace, std::string_view name,
 }  // namespace
 
 QwenDFlashGpuSnapshot::~QwenDFlashGpuSnapshot() {
-  if (d_k_ != nullptr) {
-    (void)hipFree(d_k_);
-  }
-  if (d_v_ != nullptr) {
-    (void)hipFree(d_v_);
-  }
+  if (buffer_pool_ == nullptr)
+    return;
+  buffer_pool_->Release(kDFlashSnapshotKSlot, {d_k_, k_capacity_});
+  buffer_pool_->Release(kDFlashSnapshotVSlot, {d_v_, v_capacity_});
 }
 
 std::size_t QwenDFlashGpuSnapshot::PersistentPayloadBytes() const {
@@ -200,6 +204,8 @@ QwenDFlashGpuExecutor::QwenDFlashGpuExecutor(
     std::shared_ptr<const QwenDFlashGpuModel> model, std::uint32_t max_context)
     : model_(std::move(model)), max_context_(max_context) {
   try {
+    snapshot_buffers_ =
+        std::make_shared<DeviceBufferPool>(kDFlashSnapshotBufferSlots);
     Allocate();
     Reset();
   } catch (...) {
@@ -638,8 +644,18 @@ std::unique_ptr<QwenDFlashGpuSnapshot> QwenDFlashGpuExecutor::SaveSnapshot()
   if (bytes == 0) {
     return snapshot;
   }
-  HIP_CHECK(hipMalloc(&snapshot->d_k_, bytes));
-  HIP_CHECK(hipMalloc(&snapshot->d_v_, bytes));
+  snapshot->buffer_pool_ = snapshot_buffers_;
+  const std::size_t full_history_bytes =
+      model_->GetDFlashConfig().num_layers *
+      static_cast<std::size_t>(history_capacity_) * kv_width * sizeof(float);
+  const auto k = snapshot_buffers_->Acquire(kDFlashSnapshotKSlot, bytes,
+                                            full_history_bytes);
+  snapshot->d_k_ = k.data;
+  snapshot->k_capacity_ = k.capacity;
+  const auto v = snapshot_buffers_->Acquire(kDFlashSnapshotVSlot, bytes,
+                                            full_history_bytes);
+  snapshot->d_v_ = v.data;
+  snapshot->v_capacity_ = v.capacity;
   auto* snapshot_k = static_cast<float*>(snapshot->d_k_);
   auto* snapshot_v = static_cast<float*>(snapshot->d_v_);
   for (std::size_t layer = 0; layer < snapshot->num_layers_; ++layer) {

@@ -20,6 +20,8 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime.h>
 
+#include "src/core/hip/device_buffer_pool.hpp"
+
 namespace gufo::hip {
 
 /// Optional synchronous host observation for the independent reference test.
@@ -70,6 +72,9 @@ private:
 
   void* d_k_{nullptr};
   void* d_v_{nullptr};
+  std::shared_ptr<DeviceBufferPool> buffer_pool_;
+  std::size_t k_capacity_{0};
+  std::size_t v_capacity_{0};
   std::size_t elements_per_layer_{0};
   std::uint32_t num_layers_{0};
   std::uint32_t kv_width_{0};
@@ -217,6 +222,7 @@ private:
   std::uint32_t injection_capacity_{0};
   hipStream_t stream_{nullptr};
   hipblasHandle_t hipblas_handle_{nullptr};
+  std::shared_ptr<DeviceBufferPool> snapshot_buffers_;
   std::unique_ptr<HipblasLtGemm> hipblaslt_gemm_;
 
   // GPU Allocations for draft KV cache

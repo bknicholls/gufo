@@ -25,6 +25,13 @@ constexpr std::array<std::uint8_t, 8> kCompactSnapshotMagic = {
 constexpr std::uint32_t kCompactSnapshotVersion = 1;
 constexpr std::size_t kCompactSnapshotHeaderBytes = 80;
 
+enum SnapshotBufferSlot : std::size_t {
+  kSnapshotKvSlot,
+  kSnapshotConvSlot,
+  kSnapshotDeltaNetSlot,
+  kSnapshotBufferSlots,
+};
+
 std::size_t CheckedMultiply(std::size_t left, std::size_t right) {
   if (left != 0 && right > std::numeric_limits<std::size_t>::max() / left) {
     throw std::overflow_error("Qwen GPU allocation size overflows");
@@ -214,18 +221,14 @@ models::qwen::vision::RopeLayout QwenGpuSnapshot::ReadRopeLayout(
 }
 
 QwenGpuSnapshot::~QwenGpuSnapshot() {
-  if (d_kv_f32_ != nullptr) {
-    (void)hipFree(d_kv_f32_);
-  }
-  if (d_kv_f16_ != nullptr) {
-    (void)hipFree(d_kv_f16_);
-  }
-  if (d_ssm_conv_ != nullptr) {
-    (void)hipFree(d_ssm_conv_);
-  }
-  if (d_ssm_deltanet_ != nullptr) {
-    (void)hipFree(d_ssm_deltanet_);
-  }
+  if (buffer_pool_ == nullptr)
+    return;
+  buffer_pool_->Release(
+      kSnapshotKvSlot,
+      {d_kv_f32_ != nullptr ? d_kv_f32_ : d_kv_f16_, kv_capacity_});
+  buffer_pool_->Release(kSnapshotConvSlot, {d_ssm_conv_, conv_capacity_});
+  buffer_pool_->Release(kSnapshotDeltaNetSlot,
+                        {d_ssm_deltanet_, deltanet_capacity_});
 }
 
 std::size_t QwenGpuSnapshot::CompactPayloadBytes() const {
@@ -489,19 +492,28 @@ std::unique_ptr<QwenGpuSnapshot> QwenGpuArena::SaveSnapshot(
   CheckedAdd(conv_bytes, &snapshot->payload_bytes_);
   CheckedAdd(deltanet_bytes, &snapshot->payload_bytes_);
 
+  snapshot->buffer_pool_ = snapshot_buffers_;
   if (kv_f32_bytes != 0) {
-    if (policy_.UsesFp16AttentionKv()) {
-      ThrowOnHipError(hipMalloc(&snapshot->d_kv_f16_, kv_f16_bytes),
-                      "failed to allocate Qwen FP16 snapshot KV");
-    } else {
-      ThrowOnHipError(hipMalloc(&snapshot->d_kv_f32_, kv_f32_bytes),
-                      "failed to allocate Qwen FP32 snapshot KV");
-    }
+    const bool fp16 = policy_.UsesFp16AttentionKv();
+    const std::size_t full_context_kv_bytes = CheckedMultiply(
+        CheckedMultiply(
+            CheckedMultiply(snapshot->attention_layers_, max_context_),
+            snapshot->kv_width_),
+        fp16 ? 2 * sizeof(std::uint16_t) : 2 * sizeof(float));
+    const auto kv = snapshot_buffers_->Acquire(
+        kSnapshotKvSlot, fp16 ? kv_f16_bytes : kv_f32_bytes,
+        full_context_kv_bytes);
+    (fp16 ? snapshot->d_kv_f16_ : snapshot->d_kv_f32_) = kv.data;
+    snapshot->kv_capacity_ = kv.capacity;
   }
-  ThrowOnHipError(hipMalloc(&snapshot->d_ssm_conv_, conv_bytes),
-                  "failed to allocate Qwen convolution snapshot");
-  ThrowOnHipError(hipMalloc(&snapshot->d_ssm_deltanet_, deltanet_bytes),
-                  "failed to allocate Qwen DeltaNet snapshot");
+  const auto conv =
+      snapshot_buffers_->Acquire(kSnapshotConvSlot, conv_bytes, conv_bytes);
+  snapshot->d_ssm_conv_ = conv.data;
+  snapshot->conv_capacity_ = conv.capacity;
+  const auto deltanet = snapshot_buffers_->Acquire(
+      kSnapshotDeltaNetSlot, deltanet_bytes, deltanet_bytes);
+  snapshot->d_ssm_deltanet_ = deltanet.data;
+  snapshot->deltanet_capacity_ = deltanet.capacity;
 
   SnapshotTransfer transfer;
   if (kv_f32_bytes != 0) {
@@ -684,6 +696,8 @@ QwenGpuArena::QwenGpuArena(const core::ModelConfig& config,
       max_batch_(std::min(max_context_, kMaxPromptBatch)),
       policy_(policy) {
   try {
+    snapshot_buffers_ =
+        std::make_shared<DeviceBufferPool>(kSnapshotBufferSlots);
     HIP_CHECK(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking));
     HIPBLAS_CHECK(hipblasCreate(&hipblas_handle));
     HIPBLAS_CHECK(hipblasSetStream(hipblas_handle, stream));
@@ -936,6 +950,7 @@ QwenGpuArena::QwenGpuArena(QwenGpuArena&& other) noexcept
   replay_captured_positions_ = other.replay_captured_positions_;
   has_saved_state_ = other.has_saved_state_;
   replay_capture_active_ = other.replay_capture_active_;
+  snapshot_buffers_ = std::move(other.snapshot_buffers_);
 
   other.d_hidden = nullptr;
   other.d_normed = nullptr;
@@ -1032,6 +1047,7 @@ QwenGpuArena& QwenGpuArena::operator=(QwenGpuArena&& other) noexcept {
     replay_captured_positions_ = other.replay_captured_positions_;
     has_saved_state_ = other.has_saved_state_;
     replay_capture_active_ = other.replay_capture_active_;
+    snapshot_buffers_ = std::move(other.snapshot_buffers_);
 
     other.d_hidden = nullptr;
     other.d_normed = nullptr;
