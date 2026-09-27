@@ -584,9 +584,14 @@ void PrintServeHelp(std::string_view program_name,
                    "Cache", &cache_disk_persist_on_stop);
     std::uint64_t idle_timeout_seconds = 0;
     parser.AddOption("", "--idle-timeout", "SEC",
-                     "Exit after SEC seconds without a request; 0 never "
-                     "(default: 0)",
+                     "Exit, or unload with --load-on-demand, after SEC "
+                     "seconds without a request; 0 never (default: 0)",
                      "Server", &idle_timeout_seconds);
+    bool load_on_demand = false;
+    parser.AddFlag("", "--load-on-demand",
+                   "Start without loading the model; the first request "
+                   "that needs it loads it",
+                   "Server", &load_on_demand);
     ServerOptionHelpTargets server_help;
     AddServerOptionsForHelp(parser, &server_help);
     parser.PrintHelp();
@@ -669,6 +674,7 @@ int RunServe(std::span<const char* const> args) {
   bool verbose = false;
   std::uint64_t idle_timeout_seconds = 0;
   bool cache_disk_persist_on_stop = false;
+  bool load_on_demand = false;
 
   // Identify the modality only after leading server options. The selected
   // parser consumes every option together, so --served-model-name -v and
@@ -1051,9 +1057,13 @@ int RunServe(std::span<const char* const> args) {
                        "server stops, so a restart resumes them",
                        "Cache", &cache_disk_persist_on_stop);
     llm_parser.AddOption("", "--idle-timeout", "SEC",
-                         "Exit after SEC seconds without a request; 0 never "
-                         "(default: 0)",
+                         "Exit, or unload with --load-on-demand, after SEC "
+                         "seconds without a request; 0 never (default: 0)",
                          "Server", &idle_timeout_seconds);
+    llm_parser.AddFlag("", "--load-on-demand",
+                       "Start without loading the model; the first "
+                       "request that needs it loads it",
+                       "Server", &load_on_demand);
 
     add_server_options(llm_parser);
     if (!llm_parser.Parse(sub_args, &parse_err)) {
@@ -1151,10 +1161,24 @@ int RunServe(std::span<const char* const> args) {
       std::cerr << "Error: --model <PATH> is required\n";
       return 2;
     }
-    std::string err;
-    ModelLoadLog load_log("text", model);
-    backend = std::make_shared<server::InferenceBackend>();
-    if (!backend->load(model, &err, max_context, session_count,
+    const char* speculation =
+        speculative_config.backend == server::TextSpeculativeBackend::kDFlash
+            ? "dflash2"
+        : speculative_config.backend == server::TextSpeculativeBackend::kDSpark
+            ? "dspark"
+        : speculative_config.backend == server::TextSpeculativeBackend::kMtp
+            ? "mtp"
+            : "off";
+    const std::string speculation_details =
+        std::string(" speculative=") + speculation +
+        " draft_limit=" + std::to_string(speculative_config.max_draft_tokens) +
+        " disk_cache=" + (cache_disk_directory.empty() ? "off" : "enabled");
+    // Loads the model into a backend: at startup, or with --load-on-demand on
+    // the first request that needs it and again after each idle unload.
+    auto load_model = [=](server::InferenceBackend& target,
+                          std::string* error) {
+      ModelLoadLog load_log("text", model);
+      if (!target.load(model, error, max_context, session_count,
                        server::TextPrefillPolicy{
                            .decode_active_tokens = prefill_chunk_tokens,
                            .max_batch_tokens = prefill_batch_tokens,
@@ -1182,28 +1206,42 @@ int RunServe(std::span<const char* const> args) {
                            .model_artifact_fingerprint = {},
                        },
                        vision_model_path)) {
-      std::cerr << "Error loading model '" << model << "': " << err << "\n";
-      return 1;
-    }
-    backend->set_model_id(served_model_name);
+        return false;
+      }
+      load_log.Complete(
+          "model=" + target.model_id() +
+          " sessions=" + std::to_string(session_count) + " context_tokens=" +
+          std::to_string(target.max_context()) + speculation_details);
+      return true;
+    };
+    backend = std::make_shared<server::InferenceBackend>();
+    // Without --served-model-name a deferred model is named after its file,
+    // so the name clients see does not change once it loads.
+    backend->set_model_id(!served_model_name.empty() || !load_on_demand
+                              ? served_model_name
+                              : std::filesystem::path(model).stem().string());
     backend->set_sampling_defaults(
         max_tokens < 0 ? 0 : static_cast<std::size_t>(max_tokens),
         sampling_config);
     backend->set_reasoning_defaults(*reasoning_defaults);
-    const char* speculation =
-        speculative_config.backend == server::TextSpeculativeBackend::kDFlash
-            ? "dflash2"
-        : speculative_config.backend == server::TextSpeculativeBackend::kDSpark
-            ? "dspark"
-        : speculative_config.backend == server::TextSpeculativeBackend::kMtp
-            ? "mtp"
-            : "off";
-    load_log.Complete(
-        "model=" + backend->model_id() +
-        " sessions=" + std::to_string(session_count) + " context_tokens=" +
-        std::to_string(backend->max_context()) + " speculative=" + speculation +
-        " draft_limit=" + std::to_string(speculative_config.max_draft_tokens) +
-        " disk_cache=" + (cache_disk_directory.empty() ? "off" : "enabled"));
+    if (load_on_demand) {
+      // Nothing opens the model until a request needs it, so confirm now that
+      // it exists instead of failing that first request.
+      std::error_code missing;
+      if (!std::filesystem::is_regular_file(model, missing)) {
+        std::cerr << "Error loading model '" << model << "': file not found\n";
+        return 1;
+      }
+      backend->set_loader(load_model);
+      server::Logger::Info("loader",
+                           "event=load_deferred model=" + backend->model_id());
+    } else {
+      std::string err;
+      if (!load_model(*backend, &err)) {
+        std::cerr << "Error loading model '" << model << "': " << err << "\n";
+        return 1;
+      }
+    }
   }
 
   server::HttpServer server(
@@ -1213,6 +1251,24 @@ int RunServe(std::span<const char* const> args) {
           .max_connections = max_connections,
           .api_key = std::move(api_key),
           .idle_timeout = std::chrono::seconds(idle_timeout_seconds),
+          .on_idle =
+              load_on_demand
+                  ? std::function<void()>(
+                        [backend, persist = cache_disk_persist_on_stop] {
+                          if (!backend->loaded())
+                            return;
+                          const auto persisted =
+                              persist
+                                  ? backend->persist_retained_continuations()
+                                  : 0;
+                          backend->unload();
+                          server::Logger::Info(
+                              "server",
+                              "event=idle_unload persisted_continuations=" +
+                                  std::to_string(persisted) + " " +
+                                  server::Logger::MemoryStatus());
+                        })
+                  : std::function<void()>{},
       },
       images);
   std::string err;

@@ -2810,6 +2810,43 @@ struct InferenceBackend::Impl {
 
   mutable std::mutex state_mutex;
   std::shared_ptr<const State> state;
+
+  // Settings from the set_* methods, guarded by state_mutex. They apply to
+  // every model loaded, so a reloaded model keeps them.
+  std::string model_id_override;
+  std::optional<SamplingDefaults> sampling_override;
+  std::optional<ReasoningOptions> reasoning_override;
+
+  // With a loader, the first request that finds no model loads one.
+  ModelLoader loader;
+  std::mutex load_mutex;
+
+  // The caller holds state_mutex.
+  void ApplyOverrides(State& target) const {
+    if (!model_id_override.empty())
+      target.model_id = model_id_override;
+    if (sampling_override.has_value())
+      target.sampling_defaults = *sampling_override;
+    if (reasoning_override.has_value())
+      target.reasoning_defaults = *reasoning_override;
+  }
+
+  [[nodiscard]] std::shared_ptr<const State> Acquire(
+      InferenceBackend& backend) {
+    if (auto current = Snapshot())
+      return current;
+    if (!loader)
+      return nullptr;
+    const std::lock_guard<std::mutex> lock(load_mutex);
+    if (auto current = Snapshot())
+      return current;
+    std::string error;
+    if (!loader(backend, &error)) {
+      Logger::Error("loader", "event=on_demand_load_failed error=" + error);
+      return nullptr;
+    }
+    return Snapshot();
+  }
 #endif
 };
 
@@ -3149,6 +3186,7 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
         std::move(runner_pool), prefill_policy, scheduler_policy);
     {
       const std::lock_guard<std::mutex> lock(impl_->state_mutex);
+      impl_->ApplyOverrides(*new_state);
       impl_->state = std::move(new_state);
     }
     return true;
@@ -3232,6 +3270,7 @@ bool InferenceBackend::load(
         std::move(runner_pool), prefill_policy, scheduler_policy);
     {
       const std::lock_guard<std::mutex> lock(impl_->state_mutex);
+      impl_->ApplyOverrides(*new_state);
       impl_->state = std::move(new_state);
     }
     return true;
@@ -3314,6 +3353,7 @@ bool InferenceBackend::load(
         std::move(runner_pool), prefill_policy, scheduler_policy);
     {
       const std::lock_guard<std::mutex> lock(impl_->state_mutex);
+      impl_->ApplyOverrides(*new_state);
       impl_->state = std::move(new_state);
     }
     return true;
@@ -3324,27 +3364,29 @@ bool InferenceBackend::load(
 }
 #endif
 
-std::size_t InferenceBackend::persist_retained_continuations() {
+void InferenceBackend::set_loader(ModelLoader loader) {
 #if defined(ENGINE_ENABLE_HIP)
-  const auto state = impl_->Snapshot();
-  return state != nullptr && state->scheduler != nullptr
-             ? state->scheduler->PersistRetainedContinuations()
-             : 0;
+  impl_->loader = std::move(loader);
 #else
-  return 0;
+  (void)loader;
 #endif
 }
 
-std::string InferenceBackend::model_id() const {
+void InferenceBackend::unload() {
 #if defined(ENGINE_ENABLE_HIP)
-  const auto state = impl_->Snapshot();
-  return state != nullptr ? state->model_id : "unknown";
-#else
-  return "unknown";
+  // Holding the load lock keeps a request from loading a second model while
+  // this one is still being freed.
+  const std::lock_guard<std::mutex> load_lock(impl_->load_mutex);
+  std::shared_ptr<const Impl::State> released;
+  {
+    const std::lock_guard<std::mutex> lock(impl_->state_mutex);
+    released = std::move(impl_->state);
+  }
+  released.reset();
 #endif
 }
 
-bool InferenceBackend::ready() const {
+bool InferenceBackend::loaded() const {
 #if defined(ENGINE_ENABLE_HIP)
   return impl_->Snapshot() != nullptr;
 #else
@@ -3361,10 +3403,44 @@ std::uint32_t InferenceBackend::max_context() const {
 #endif
 }
 
-InferenceBackend::SamplingDefaults InferenceBackend::sampling_defaults() const {
+std::size_t InferenceBackend::persist_retained_continuations() {
 #if defined(ENGINE_ENABLE_HIP)
   const auto state = impl_->Snapshot();
-  return state != nullptr ? state->sampling_defaults : SamplingDefaults{};
+  return state != nullptr && state->scheduler != nullptr
+             ? state->scheduler->PersistRetainedContinuations()
+             : 0;
+#else
+  return 0;
+#endif
+}
+
+std::string InferenceBackend::model_id() const {
+#if defined(ENGINE_ENABLE_HIP)
+  if (const auto state = impl_->Snapshot(); state != nullptr)
+    return state->model_id;
+  const std::lock_guard<std::mutex> lock(impl_->state_mutex);
+  return impl_->model_id_override.empty() ? "unknown"
+                                          : impl_->model_id_override;
+#else
+  return "unknown";
+#endif
+}
+
+bool InferenceBackend::ready() const {
+#if defined(ENGINE_ENABLE_HIP)
+  // A deferred model counts as ready: the next request loads it.
+  return impl_->Snapshot() != nullptr || static_cast<bool>(impl_->loader);
+#else
+  return false;
+#endif
+}
+
+InferenceBackend::SamplingDefaults InferenceBackend::sampling_defaults() const {
+#if defined(ENGINE_ENABLE_HIP)
+  if (const auto state = impl_->Snapshot(); state != nullptr)
+    return state->sampling_defaults;
+  const std::lock_guard<std::mutex> lock(impl_->state_mutex);
+  return impl_->sampling_override.value_or(SamplingDefaults{});
 #else
   return {};
 #endif
@@ -3372,8 +3448,10 @@ InferenceBackend::SamplingDefaults InferenceBackend::sampling_defaults() const {
 
 ReasoningOptions InferenceBackend::reasoning_defaults() const {
 #if defined(ENGINE_ENABLE_HIP)
-  const auto state = impl_->Snapshot();
-  return state != nullptr ? state->reasoning_defaults : ReasoningOptions{};
+  if (const auto state = impl_->Snapshot(); state != nullptr)
+    return state->reasoning_defaults;
+  const std::lock_guard<std::mutex> lock(impl_->state_mutex);
+  return impl_->reasoning_override.value_or(ReasoningOptions{});
 #else
   return {};
 #endif
@@ -3382,7 +3460,8 @@ ReasoningOptions InferenceBackend::reasoning_defaults() const {
 InferenceBackend::InitialOutputState InferenceBackend::initial_output_state(
     const ChatRequest& request) const {
 #if defined(ENGINE_ENABLE_HIP)
-  const auto state = impl_->Snapshot();
+  // Loading is not observable state, so a const query may trigger it.
+  const auto state = impl_->Acquire(const_cast<InferenceBackend&>(*this));
   return state != nullptr
              ? state->scheduler->runner().InitialOutputState(request)
              : InitialOutputState::kAuto;
@@ -3398,6 +3477,7 @@ void InferenceBackend::set_model_id(const std::string& model_id) {
     return;
   }
   const std::lock_guard<std::mutex> lock(impl_->state_mutex);
+  impl_->model_id_override = model_id;
   if (impl_->state == nullptr) {
     return;
   }
@@ -3414,6 +3494,10 @@ void InferenceBackend::set_sampling_defaults(
 #if defined(ENGINE_ENABLE_HIP)
   sampling_config.Validate();
   const std::lock_guard<std::mutex> lock(impl_->state_mutex);
+  impl_->sampling_override = SamplingDefaults{
+      .max_tokens = max_tokens,
+      .sampling = sampling_config,
+  };
   if (impl_->state == nullptr) {
     return;
   }
@@ -3433,6 +3517,7 @@ void InferenceBackend::set_reasoning_defaults(
     const ReasoningOptions& reasoning) {
 #if defined(ENGINE_ENABLE_HIP)
   const std::lock_guard<std::mutex> lock(impl_->state_mutex);
+  impl_->reasoning_override = reasoning;
   if (impl_->state == nullptr) {
     return;
   }
@@ -3452,7 +3537,7 @@ InferenceBackend::Result InferenceBackend::complete(
     const std::vector<std::string>& stop_sequences) {
 #if defined(ENGINE_ENABLE_HIP)
   const auto request_start = Clock::now();
-  const auto state = impl_->Snapshot();
+  const auto state = impl_->Acquire(*this);
   if (state == nullptr) {
     return {};
   }
@@ -3479,7 +3564,7 @@ InferenceBackend::Result InferenceBackend::chat(
     const CancellationCheck& is_cancelled, const TokenCallback& on_token) {
 #if defined(ENGINE_ENABLE_HIP)
   const auto request_start = Clock::now();
-  const auto state = impl_->Snapshot();
+  const auto state = impl_->Acquire(*this);
   if (state == nullptr) {
     return {};
   }
@@ -3510,7 +3595,7 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
                              bool stream_output) {
 #if defined(ENGINE_ENABLE_HIP)
   const auto request_start = Clock::now();
-  const auto state = impl_->Snapshot();
+  const auto state = impl_->Acquire(*this);
   if (state == nullptr) {
     return TextGenerationBackend::start_chat(
         request, max_tokens, sampling_config, is_cancelled, stream_output);
@@ -3554,7 +3639,7 @@ InferenceBackend::Result InferenceBackend::chat(
 
 std::size_t InferenceBackend::count_tokens(std::string_view text) const {
 #if defined(ENGINE_ENABLE_HIP)
-  const auto state = impl_->Snapshot();
+  const auto state = impl_->Acquire(const_cast<InferenceBackend&>(*this));
   if (state == nullptr) {
     return 0;
   }

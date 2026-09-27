@@ -630,7 +630,11 @@ state; the prompt snapshot remains available for safe replay. Image identity,
 positions and speculative state participate in restoration and cache isolation.
 
 `--idle-timeout SEC` stops the server after SEC seconds without an open
-connection or request.
+connection or request. `--load-on-demand` starts listening without loading the
+model: the first request that needs the model loads it and waits for the load,
+and `/v1/models` reports the served name meanwhile (the model file name
+without `--served-model-name`). With both flags, an idle server unloads the
+model and keeps listening instead of exiting.
 
 `GET /health` reports process liveness. `GET /ready` returns 503 until a model
 service is ready, then reports `status` and the active model. It does not expose

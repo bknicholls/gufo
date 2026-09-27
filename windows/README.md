@@ -85,3 +85,19 @@ verified on Windows.
   1024-token batches instead of 4096. That saves ~1.5 GB for ~2% prefill
   throughput. 1024 is the minimum, the smallest batch the fp16 prefill route
   runs on.
+- HIP on Windows lacks virtual-memory, pool-trim and managed-memory APIs, and
+  memory the driver has locked is never trimmed or compressed. Idle memory is
+  therefore reclaimed by releasing the whole model. `--load-on-demand` with
+  `--idle-timeout` and `--cache-disk-persist-on-stop` unloads the model when
+  idle, leaving a ~200 MB process. The next request reloads it and resumes
+  the conversations from disk.
+
+## Starting with Windows
+
+With `--load-on-demand` the server starts in well under a second and holds no
+model until the first request, so it can run from logon. A shortcut in the
+user's Startup folder, which needs no admin rights, can launch it hidden:
+
+```
+conhost.exe --headless powershell.exe -NoProfile -File <script that starts gufo.exe serve>
+```

@@ -113,6 +113,18 @@ public:
             TextDiskCacheConfig disk_cache_config = {});
 #endif
 
+  using ModelLoader =
+      std::function<bool(InferenceBackend& backend, std::string* error)>;
+
+  /// Defers loading: the first request that needs a model calls `loader`,
+  /// which loads one with load(). unload() releases it, and the next request
+  /// loads it again. The set_* settings apply to every model loaded.
+  void set_loader(ModelLoader loader);
+  /// Releases the loaded model, if any. Requests in flight keep the model they
+  /// use until they finish.
+  void unload();
+  [[nodiscard]] bool loaded() const;
+
   /// Stable model identifier used in API responses.
   [[nodiscard]] std::string model_id() const override;
   /// Writes the continuations kept in memory to the disk cache, for a server
