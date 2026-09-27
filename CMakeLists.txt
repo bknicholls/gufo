@@ -115,6 +115,7 @@ add_library(gufo_core STATIC
   src/models/minimax_h3/json.cpp
   src/models/minimax_h3/media.cpp
   src/models/minimax_h3/media_process_posix.cpp
+  src/models/minimax_h3/media_process_windows.cpp
   src/models/minimax_h3/prompt_encoder.cpp
   src/models/minimax_h3/runtime.cpp
   src/models/minimax_h3/sampling.cpp

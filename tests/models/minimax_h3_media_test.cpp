@@ -6,6 +6,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -20,6 +21,44 @@ using gufo::minimax_h3::MediaProbe;
 using gufo::minimax_h3::MediaVideoOptions;
 using gufo::minimax_h3::ProbeMediaFile;
 using gufo::minimax_h3::WriteSynchronizedMp4;
+
+// A program that exits with an error on FFmpeg's arguments without reading
+// its input. Windows has no /bin/false; where.exe rejects the arguments.
+#if defined(_WIN32)
+constexpr const char* kFailingProgram = "where.exe";
+#else
+constexpr const char* kFailingProgram = "/bin/false";
+#endif
+
+// Sets an environment variable until destruction, then restores it.
+class ScopedEnvironment {
+public:
+  ScopedEnvironment(const char* name, const char* value) : name_(name) {
+    if (const char* previous = std::getenv(name)) {
+      previous_ = previous;
+    }
+    Set(value);
+  }
+  ~ScopedEnvironment() { Set(previous_ ? previous_->c_str() : nullptr); }
+  ScopedEnvironment(const ScopedEnvironment&) = delete;
+  ScopedEnvironment& operator=(const ScopedEnvironment&) = delete;
+
+private:
+  void Set(const char* value) const {
+#if defined(_WIN32)
+    (void)_putenv_s(name_, value == nullptr ? "" : value);
+#else
+    if (value == nullptr) {
+      (void)unsetenv(name_);
+    } else {
+      (void)setenv(name_, value, 1);
+    }
+#endif
+  }
+
+  const char* name_;
+  std::optional<std::string> previous_;
+};
 
 [[noreturn]] void Fail(const std::string& message) {
   std::cerr << "FAIL minimax_h3_media_test: " << message << '\n';
@@ -183,35 +222,26 @@ int main() {
   }
   std::filesystem::remove(cancelled_output, ignored);
 
-  const char* saved = std::getenv("GUFO_FFMPEG");
-  const std::string saved_value = saved == nullptr ? "" : saved;
   WriteSentinel(error_output);
-  setenv("GUFO_FFMPEG", "/bin/false", 1);
-  const bool error_result = WriteSynchronizedMp4(
-      error_output, frames, kFrames, kWidth, kHeight, 24, pcm, kSamples, 2,
-      32000, nullptr, &telemetry, &error);
-  if (saved == nullptr) {
-    unsetenv("GUFO_FFMPEG");
-  } else {
-    setenv("GUFO_FFMPEG", saved_value.c_str(), 1);
+  bool error_result = false;
+  {
+    const ScopedEnvironment failing_ffmpeg("GUFO_FFMPEG", kFailingProgram);
+    error_result = WriteSynchronizedMp4(error_output, frames, kFrames, kWidth,
+                                        kHeight, 24, pcm, kSamples, 2, 32000,
+                                        nullptr, &telemetry, &error);
   }
   if (error_result || !HasSentinel(error_output) ||
       HasPartialFor(error_output)) {
     Fail("FFmpeg child error did not preserve the prior output");
   }
 
-  const char* saved_probe = std::getenv("GUFO_FFPROBE");
-  const std::string saved_probe_value =
-      saved_probe == nullptr ? "" : saved_probe;
   WriteSentinel(probe_error_output);
-  setenv("GUFO_FFPROBE", "/bin/false", 1);
-  const bool probe_error_result = WriteSynchronizedMp4(
-      probe_error_output, frames, kFrames, kWidth, kHeight, 24, pcm, kSamples,
-      2, 32000, nullptr, &telemetry, &error);
-  if (saved_probe == nullptr) {
-    unsetenv("GUFO_FFPROBE");
-  } else {
-    setenv("GUFO_FFPROBE", saved_probe_value.c_str(), 1);
+  bool probe_error_result = false;
+  {
+    const ScopedEnvironment failing_ffprobe("GUFO_FFPROBE", kFailingProgram);
+    probe_error_result = WriteSynchronizedMp4(
+        probe_error_output, frames, kFrames, kWidth, kHeight, 24, pcm, kSamples,
+        2, 32000, nullptr, &telemetry, &error);
   }
   if (probe_error_result || !HasSentinel(probe_error_output) ||
       HasPartialFor(probe_error_output)) {
