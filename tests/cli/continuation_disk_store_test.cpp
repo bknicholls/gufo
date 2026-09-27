@@ -32,6 +32,7 @@ using gufo::server::ChatRequest;
 using gufo::server::ContinuationDiskEvent;
 using gufo::server::ContinuationDiskEventAction;
 using gufo::server::ContinuationDiskEventReason;
+using gufo::server::ContinuationDiskSaveKind;
 using gufo::server::ContinuationDiskStore;
 using gufo::server::ContinuationDiskStoreOptions;
 using gufo::server::TextDecodeSelection;
@@ -940,6 +941,35 @@ void TestSharedPrefixBoundariesAndExactDedup() {
          "capping keeps the longest boundary");
 }
 
+void TestSharedPrefixOnlyPersistsSharedPrefixes() {
+  TemporaryDirectory directory;
+  auto runner = std::make_shared<FakeRunner>("shared-prefix-only");
+  auto options = StoreOptions(directory.path());
+  options.shared_prefix_only = true;
+  ContinuationDiskStore store(options);
+
+  Expect(store.SaveAsync(runner, {7, 7, 7, 1, 2},
+                         MakeSnapshot(*runner, 11, 5)) == 0 &&
+             store.ReserveCapture(*runner, 5, sizeof(FakeSnapshot)) == nullptr,
+         "a conversation's own continuation is not persisted");
+  store.RecordPrompt(*runner, std::vector<TextRunnerToken>{7, 7, 7, 1, 2});
+  const std::vector<TextRunnerToken> second_prompt = {7, 7, 7, 3, 4};
+  Expect(store.SharedPrefixBoundaries(*runner, second_prompt, 1, 4) ==
+             std::vector<std::size_t>{3},
+         "a recorded prompt exposes the prefix a later prompt shares");
+  Expect(store.SaveAsync(runner, {7, 7, 7}, MakeSnapshot(*runner, 77, 3), {},
+                         {}, ContinuationDiskSaveKind::kSharedPrefix) != 0,
+         "the shared prefix is persisted");
+  store.Flush();
+  auto state = runner->CreateState();
+  const auto restored = RestoreTokens(store, *runner, *state, {7, 7, 7, 9});
+  Expect(restored.restored && restored.token_count == 3 &&
+             RequireFakeState(*state).value == 77,
+         "a new conversation restores the shared prefix");
+  Expect(CacheFiles(directory.path()).size() == 1,
+         "only the shared prefix reaches disk");
+}
+
 void TestBoundedAsyncPersistenceDoesNotBlockLookup() {
   TemporaryDirectory directory;
   auto runner = std::make_shared<FakeRunner>("async-store");
@@ -1010,6 +1040,36 @@ void TestBoundedAsyncPersistenceDoesNotBlockLookup() {
          "shutdown drains accepted persistence jobs");
 }
 
+void TestSharedPrefixOnlyIgnoresTurnTails() {
+  TemporaryDirectory directory;
+  const FakeRunner runner("shared-prefix-tail");
+  auto options = StoreOptions(directory.path());
+  options.shared_prefix_only = true;
+  ContinuationDiskStore store(options);
+  std::vector<TextRunnerToken> history;
+  for (TextRunnerToken token = 1000; token < 1200; ++token)
+    history.push_back(token);
+
+  // A turn's prompt ends with its generation prompt. The next turn replaces
+  // those last tokens with the reply, so the two prompts part just before
+  // the end of the first one.
+  auto first_turn = history;
+  first_turn.insert(first_turn.end(), {7, 8});
+  store.RecordPrompt(runner, first_turn);
+  auto next_turn = history;
+  next_turn.insert(next_turn.end(), {9, 10, 11});
+  Expect(store.SharedPrefixBoundaries(runner, next_turn, 128, 4).empty(),
+         "the previous turn's generation prompt is not a shared prefix");
+
+  auto other_conversation = history;
+  for (TextRunnerToken token = 5000; token < 5200; ++token)
+    other_conversation.push_back(token);
+  store.RecordPrompt(runner, other_conversation);
+  Expect(store.SharedPrefixBoundaries(runner, next_turn, 128, 4) ==
+             std::vector<std::size_t>{history.size()},
+         "a prefix another conversation runs past is shared");
+}
+
 void TestIndexedPrefixLookup() {
   TemporaryDirectory directory;
   FakeRunner runner("prefix-index");
@@ -1074,8 +1134,10 @@ void TestImageIdentitySurvivesRestart() {
 int main() {
   TestBoundedAsyncPersistenceDoesNotBlockLookup();
   TestIndexedPrefixLookup();
+  TestSharedPrefixOnlyIgnoresTurnTails();
   TestImageIdentitySurvivesRestart();
   TestSharedPrefixBoundariesAndExactDedup();
+  TestSharedPrefixOnlyPersistsSharedPrefixes();
   TestSha256KnownVector();
   TestRestartRestoreAndCompatibilityIdentity();
   TestLongestPrefixAndForcedHashCollision();

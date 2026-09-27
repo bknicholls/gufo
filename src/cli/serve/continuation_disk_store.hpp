@@ -61,6 +61,18 @@ struct ContinuationDiskStoreOptions {
   std::size_t capacity_bytes{TextRunnerDiskCacheOptions::kDefaultCapacityBytes};
   /// Zero resolves to the host snapshot budget, capped by capacity_bytes.
   std::size_t staging_capacity_bytes{0};
+  /// Persist only shared-prefix snapshots. Each request's own continuation is
+  /// then kept in memory only, and recorded prompts stand in for its stored
+  /// entry when discovering shared prefixes. This trades restart-safe resume
+  /// of individual conversations for far less disk write volume.
+  bool shared_prefix_only{false};
+};
+
+enum class ContinuationDiskSaveKind : std::uint8_t {
+  /// A request's own prompt or live checkpoint.
+  kContinuation,
+  /// A prefix shared across conversations, learned from earlier prompts.
+  kSharedPrefix,
 };
 
 /// Restart-safe, provider-neutral exact-prefix snapshot store.
@@ -142,7 +154,15 @@ public:
       std::vector<TextRunnerToken> checkpoint_tokens,
       std::shared_ptr<const TextRunnerSnapshot> snapshot,
       std::vector<std::uint8_t> input_identity = {},
-      std::unique_ptr<CaptureReservation> reservation = {});
+      std::unique_ptr<CaptureReservation> reservation = {},
+      ContinuationDiskSaveKind kind = ContinuationDiskSaveKind::kContinuation);
+
+  /// Remembers a prompt's tokens, without any snapshot or disk I/O, so a later
+  /// prompt sharing its prefix finds that boundary. Only has an effect with
+  /// shared_prefix_only, where continuations are otherwise never stored.
+  void RecordPrompt(const TextModelRunner& runner,
+                    std::span<const TextRunnerToken> prompt,
+                    std::span<const std::uint8_t> input_identity = {});
 
   /// Drains accepted writes. Shutdown also drains automatically.
   void Flush();

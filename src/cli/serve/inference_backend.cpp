@@ -3138,6 +3138,7 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
           .directory = std::move(disk_cache_config.directory),
           .capacity_bytes = disk_cache_config.capacity_bytes,
           .staging_capacity_bytes = disk_cache_config.staging_capacity_bytes,
+          .shared_prefix_only = disk_cache_config.shared_prefix_only,
       };
     }
     Logger::Info("loader",
@@ -3222,6 +3223,7 @@ bool InferenceBackend::load(
           .directory = std::move(disk_cache_config.directory),
           .capacity_bytes = disk_cache_config.capacity_bytes,
           .staging_capacity_bytes = disk_cache_config.staging_capacity_bytes,
+          .shared_prefix_only = disk_cache_config.shared_prefix_only,
       };
     }
     auto runner_pool = std::make_shared<TextRunnerPool>(
@@ -3303,6 +3305,7 @@ bool InferenceBackend::load(
           .directory = std::move(disk_cache_config.directory),
           .capacity_bytes = disk_cache_config.capacity_bytes,
           .staging_capacity_bytes = disk_cache_config.staging_capacity_bytes,
+          .shared_prefix_only = disk_cache_config.shared_prefix_only,
       };
     }
     auto runner_pool = std::make_shared<TextRunnerPool>(

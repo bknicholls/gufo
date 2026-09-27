@@ -562,6 +562,7 @@ void PrintServeHelp(std::string_view program_name,
         "", "--max-buffered-output-total", "N",
         "Maximum queued stream bytes across requests (default: 262144)",
         "Scheduling", &max_buffered_output_bytes_total);
+    bool cache_disk_shared_prefix_only = false;
     parser.AddOption("", "--cache-disk", "DIR",
                      "Opt-in restart-safe continuation cache directory",
                      "Cache", &cache_disk_directory);
@@ -573,6 +574,9 @@ void PrintServeHelp(std::string_view program_name,
                      "RAM limit for queued snapshots and each disk read "
                      "(default: 0 = auto, at most 1 GiB and 1/8 available RAM)",
                      "Cache", &cache_disk_staging_bytes);
+    parser.AddFlag("", "--cache-disk-shared-prefix-only",
+                   "Persist only prefixes shared across conversations", "Cache",
+                   &cache_disk_shared_prefix_only);
     std::uint64_t idle_timeout_seconds = 0;
     parser.AddOption("", "--idle-timeout", "SEC",
                      "Exit after SEC seconds without a request; 0 never "
@@ -1020,6 +1024,7 @@ int RunServe(std::span<const char* const> args) {
         "", "--max-buffered-output-total", "N",
         "Maximum queued stream bytes across requests (default: 262144)",
         "Scheduling", &max_buffered_output_bytes_total);
+    bool cache_disk_shared_prefix_only = false;
     llm_parser.AddOption("", "--cache-disk", "DIR",
                          "Opt-in restart-safe continuation cache directory",
                          "Cache", &cache_disk_directory);
@@ -1032,6 +1037,9 @@ int RunServe(std::span<const char* const> args) {
         "RAM limit for queued snapshots and each disk read "
         "(default: 0 = auto, at most 1 GiB and 1/8 available RAM)",
         "Cache", &cache_disk_staging_bytes);
+    llm_parser.AddFlag("", "--cache-disk-shared-prefix-only",
+                       "Persist only prefixes shared across conversations",
+                       "Cache", &cache_disk_shared_prefix_only);
     llm_parser.AddOption("", "--idle-timeout", "SEC",
                          "Exit after SEC seconds without a request; 0 never "
                          "(default: 0)",
@@ -1159,6 +1167,7 @@ int RunServe(std::span<const char* const> args) {
                            .directory = cache_disk_directory,
                            .capacity_bytes = cache_disk_bytes,
                            .staging_capacity_bytes = cache_disk_staging_bytes,
+                           .shared_prefix_only = cache_disk_shared_prefix_only,
                            .model_artifact_fingerprint = {},
                        },
                        vision_model_path)) {

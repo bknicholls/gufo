@@ -1067,6 +1067,51 @@ void TestDiskPreflightAvoidsUnusableCapture() {
          "disk staging refusal happens before snapshot capture");
 }
 
+void TestSharedPrefixOnlyPersistsOnlySharedPrefixes() {
+  TemporaryDirectory directory;
+  const TextRunnerDiskCacheOptions disk_cache{
+      .directory = directory.path(),
+      .capacity_bytes = 8192,
+      .staging_capacity_bytes = 4096,
+      .shared_prefix_min_tokens = 2,
+      .shared_prefix_max_boundaries = 4,
+      .shared_prefix_only = true,
+  };
+  auto stats = std::make_shared<FakeStats>();
+  auto runner = std::make_shared<PersistentSnapshotRunner>(
+      stats, "artifact-A", sizeof(FakeSnapshot) - 1);
+  {
+    // Discovery rests on the prompts this pool has seen, so both
+    // conversations run through one pool, as they do in a server.
+    TextRunnerPool pool(runner, 1, disk_cache);
+    {
+      auto request = pool.Acquire({7, 7, 7, 1, 2});
+      Expect(request.Prefill(8).consumed_tokens == 5,
+             "nothing is shared yet, so prefill runs uninterrupted");
+      const auto commit = request.Commit();
+      Expect(
+          commit.disk_queued_bytes == 0 && commit.shared_prefix_snapshots == 0,
+          "a conversation's own checkpoint is not written to disk");
+    }
+    {
+      auto request = pool.Acquire({7, 7, 7, 3, 4, 5});
+      const auto first = request.Prefill(8);
+      Expect(first.consumed_tokens == 3 && !first.decode_ready,
+             "a recorded prompt exposes the shared prefix");
+      Expect(request.Prefill(8).decode_ready, "prefill resumes after it");
+      const auto commit = request.Commit();
+      Expect(
+          commit.shared_prefix_snapshots == 1 && commit.disk_queued_bytes == 0,
+          "only the shared prefix is written to disk");
+    }
+  }
+  TextRunnerPool restarted(runner, 1, disk_cache);
+  auto request = restarted.Acquire({7, 7, 7, 3, 4, 5, 6});
+  Expect(request.cache_disk_hit() && request.cached_prompt_tokens() == 3,
+         "a restart finds the shared prefix but no conversation checkpoint");
+  request.Invalidate();
+}
+
 void TestMeasuredStateIsReconciledWithClaim() {
   auto stats = std::make_shared<FakeStats>();
   bool rejected = false;
@@ -1172,6 +1217,7 @@ int main() {
   Expect(normal_log.str().empty(), "routine cache replacement stays quiet");
   TestPersistentSnapshotRestoresAcrossPools();
   TestSharedPrefixIsLearnedAndRestoredAcrossConversations();
+  TestSharedPrefixOnlyPersistsOnlySharedPrefixes();
   TestMeasuredStateIsReconciledWithClaim();
   TestSnapshotBudgetRefusalDoesNotFailCompletedRequest();
   std::ostringstream failure_log;

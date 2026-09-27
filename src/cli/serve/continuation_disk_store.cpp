@@ -429,9 +429,12 @@ struct ContinuationDiskStore::Impl {
     std::optional<EntryIterator> entry;
     std::map<TextRunnerToken, std::unique_ptr<PrefixNode>> children;
 
-    void Insert(std::span<const TextRunnerToken> tokens, EntryIterator value) {
+    /// A null value records the path alone, for shared-prefix discovery.
+    void Insert(std::span<const TextRunnerToken> tokens,
+                std::optional<EntryIterator> value) {
       if (tokens.empty()) {
-        entry = value;
+        if (value)
+          entry = value;
         return;
       }
       auto& child = children[tokens.front()];
@@ -455,6 +458,24 @@ struct ContinuationDiskStore::Impl {
       child->Insert(tokens.subspan(shared), value);
     }
 
+    /// Prunes a path recorded without an entry. An entry stored at exactly
+    /// that path keeps its node, unlike Erase.
+    void ErasePath(std::span<const TextRunnerToken> tokens) noexcept {
+      if (tokens.empty())
+        return;
+      auto found = children.find(tokens.front());
+      if (found == children.end())
+        return;
+      auto& child = *found->second;
+      if (tokens.size() < child.edge.size() ||
+          !std::ranges::equal(child.edge, tokens.first(child.edge.size()))) {
+        return;
+      }
+      child.ErasePath(tokens.subspan(child.edge.size()));
+      if (!child.entry && child.children.empty())
+        children.erase(found);
+    }
+
     void Erase(std::span<const TextRunnerToken> tokens) noexcept {
       if (tokens.empty()) {
         entry.reset();
@@ -473,13 +494,25 @@ struct ContinuationDiskStore::Impl {
         children.erase(found);
     }
 
+    /// Tokens along the longest path below this node, excluding its own edge.
+    [[nodiscard]] std::size_t Depth() const {
+      std::size_t deepest = 0;
+      for (const auto& [token, child] : children)
+        deepest = std::max(deepest, child->edge.size() + child->Depth());
+      return deepest;
+    }
+
     struct Match {
       std::optional<EntryIterator> longest;
       std::vector<std::size_t> shared_boundaries;
     };
 
+    /// With `boundaries`, also reports where the prompt leaves other paths.
+    /// A boundary counts only if one of those paths runs at least
+    /// `min_divergent_tokens` past it.
     [[nodiscard]] Match Find(std::span<const TextRunnerToken> prompt,
-                             bool boundaries = false) const {
+                             bool boundaries = false,
+                             std::size_t min_divergent_tokens = 0) const {
       Match result;
       const PrefixNode* node = this;
       std::size_t offset = 0;
@@ -489,9 +522,22 @@ struct ContinuationDiskStore::Impl {
         if (offset == prompt.size())
           break;
         const auto next = node->children.find(prompt[offset]);
+        const auto diverging_depth = [&] {
+          std::size_t deepest = 0;
+          for (auto other = node->children.begin();
+               other != node->children.end(); ++other) {
+            if (other != next) {
+              deepest = std::max(
+                  deepest, other->second->edge.size() + other->second->Depth());
+            }
+          }
+          return deepest;
+        };
         if (boundaries && !node->entry && offset != 0 &&
             (node->children.size() > 1 ||
-             (!node->children.empty() && next == node->children.end()))) {
+             (!node->children.empty() && next == node->children.end())) &&
+            (min_divergent_tokens == 0 ||
+             diverging_depth() >= min_divergent_tokens)) {
           result.shared_boundaries.push_back(offset);
         }
         if (next == node->children.end())
@@ -503,7 +549,10 @@ struct ContinuationDiskStore::Impl {
             static_cast<std::size_t>(mismatch.in1 - child.edge.begin());
         offset += shared;
         if (shared != child.edge.size()) {
-          if (boundaries && offset != 0 && offset < prompt.size()) {
+          if (boundaries && offset != 0 && offset < prompt.size() &&
+              (min_divergent_tokens == 0 ||
+               child.edge.size() - shared + child.Depth() >=
+                   min_divergent_tokens)) {
             result.shared_boundaries.push_back(offset);
           }
           break;
@@ -1305,7 +1354,14 @@ struct ContinuationDiskStore::Impl {
     const auto root = prefixes.find(PrefixKey(*descriptor.persistence));
     if (root == prefixes.end())
       return {};
-    auto boundaries = root->second.Find(prompt, true).shared_boundaries;
+    // In shared-prefix-only mode the trie holds recent prompts, and a new turn
+    // leaves the previous prompt a few tokens before its end, where its
+    // generation prompt was. Only a path that runs well past a boundary marks
+    // a prefix another conversation shares.
+    auto boundaries =
+        root->second
+            .Find(prompt, true, options.shared_prefix_only ? min_tokens : 0)
+            .shared_boundaries;
     std::erase_if(boundaries,
                   [min_tokens](auto length) { return length < min_tokens; });
     // Keep the longest ones: they save the most prefill when they hit.
@@ -1315,6 +1371,38 @@ struct ContinuationDiskStore::Impl {
           boundaries.end() - static_cast<std::ptrdiff_t>(max_boundaries));
     }
     return boundaries;
+  }
+
+  void RecordPrompt(const TextModelRunner& runner,
+                    std::span<const TextRunnerToken> prompt,
+                    std::span<const std::uint8_t> input_identity) {
+    if (!options.shared_prefix_only || prompt.empty())
+      return;
+    const auto descriptor = DescriptorForInput(runner, input_identity);
+    if (!descriptor.persistence.has_value())
+      return;
+    auto key = PrefixKey(*descriptor.persistence);
+    const auto duplicate =
+        std::ranges::find_if(recorded_prompts, [&](const auto& recorded) {
+          return recorded.first == key &&
+                 std::ranges::equal(recorded.second, prompt);
+        });
+    if (duplicate != recorded_prompts.end()) {
+      recorded_prompts.push_back(std::move(*duplicate));
+      recorded_prompts.erase(duplicate);
+      return;
+    }
+    prefixes[key].Insert(prompt, std::nullopt);
+    recorded_prompts.emplace_back(
+        std::move(key),
+        std::vector<TextRunnerToken>(prompt.begin(), prompt.end()));
+    while (recorded_prompts.size() > kMaxRecordedPrompts) {
+      auto& oldest = recorded_prompts.front();
+      const auto root = prefixes.find(oldest.first);
+      if (root != prefixes.end())
+        root->second.ErasePath(oldest.second);
+      recorded_prompts.pop_front();
+    }
   }
 
   [[nodiscard]] bool Touch(const TextModelRunner& runner,
@@ -1343,6 +1431,11 @@ struct ContinuationDiskStore::Impl {
   std::list<Entry> entries;
   std::unordered_multimap<std::string, EntryIterator> index;
   std::map<PersistenceKey, PrefixNode> prefixes;
+  // Recent prompts kept as trie paths so shared prefixes are discovered
+  // without storing each conversation. Bounded, oldest pruned first.
+  static constexpr std::size_t kMaxRecordedPrompts = 32;
+  std::deque<std::pair<PersistenceKey, std::vector<TextRunnerToken>>>
+      recorded_prompts;
   std::atomic<std::size_t> retained{0};
   std::atomic<std::size_t> retained_entries{0};
   std::random_device random_device;
@@ -1373,6 +1466,9 @@ std::unique_ptr<ContinuationDiskStore::CaptureReservation>
 ContinuationDiskStore::ReserveCapture(
     const TextModelRunner& runner, std::size_t token_count,
     std::size_t snapshot_bytes, std::span<const std::uint8_t> input_identity) {
+  // Disk-only captures exist to persist a continuation, which this mode skips.
+  if (impl_->options.shared_prefix_only)
+    return {};
   const auto descriptor = DescriptorForInput(runner, input_identity);
   if (!descriptor.persistence || token_count == 0 || snapshot_bytes == 0)
     return {};
@@ -1408,8 +1504,12 @@ std::size_t ContinuationDiskStore::SaveAsync(
     std::vector<TextRunnerToken> checkpoint_tokens,
     std::shared_ptr<const TextRunnerSnapshot> snapshot,
     std::vector<std::uint8_t> input_identity,
-    std::unique_ptr<CaptureReservation> reservation) {
+    std::unique_ptr<CaptureReservation> reservation,
+    ContinuationDiskSaveKind kind) {
   if (!runner || !snapshot || checkpoint_tokens.empty())
+    return 0;
+  if (impl_->options.shared_prefix_only &&
+      kind == ContinuationDiskSaveKind::kContinuation)
     return 0;
   const auto descriptor = DescriptorForInput(*runner, input_identity);
   if (!descriptor.persistence)
@@ -1478,6 +1578,13 @@ std::vector<std::size_t> ContinuationDiskStore::SharedPrefixBoundaries(
     return {};
   return impl_->SharedPrefixBoundaries(runner, prompt, min_tokens,
                                        max_boundaries, input_identity);
+}
+
+void ContinuationDiskStore::RecordPrompt(
+    const TextModelRunner& runner, std::span<const TextRunnerToken> prompt,
+    std::span<const std::uint8_t> input_identity) {
+  const ScopedOperationPermit permit(impl_->operation_gate);
+  impl_->RecordPrompt(runner, prompt, input_identity);
 }
 
 bool ContinuationDiskStore::Touch(

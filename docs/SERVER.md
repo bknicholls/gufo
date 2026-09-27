@@ -168,6 +168,11 @@ limits), and the disk budget. This bounds queued captures/writes and each disk
 read separately; it allocates nothing upfront. Live model state and retained
 RAM snapshots have separate budgets.
 
+`--cache-disk-shared-prefix-only` writes only prefixes that several
+conversations share, such as a common system prompt with its tool
+definitions, rather than every conversation's checkpoint. A prefix becomes
+shared when a later prompt repeats it.
+
 Snapshots that exceed either limit are skipped with their required size and
 available budget logged; live conversation reuse remains available. Existing
 files that exceed the current staging limit are preserved subject to disk LRU

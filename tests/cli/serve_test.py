@@ -62,6 +62,7 @@ def main():
     assert "0 = auto, at most 1 GiB and 1/8 available RAM" in help_text
     assert "--prefill-batch" in help_text
     assert "--idle-timeout" in help_text
+    assert "--cache-disk-shared-prefix-only" in help_text
     check(["bench", "--help"], 0, "Path to GGUF model file (required)")
     for args in (["serve"], ["serve", "llm"], ["bench"],
                  ["serve", "llm", "--model", ""], ["bench", "--model", ""]):
@@ -91,6 +92,9 @@ def main():
            "1024"], 1, "Error loading model")
     check(["serve", "llm", "--model", "missing.gguf", "--idle-timeout", "60"],
           1, "Error loading model")
+    check(["serve", "llm", "--model", "missing.gguf", "--cache-disk",
+           "/unused-cache", "--cache-disk-shared-prefix-only"], 1,
+          "Error loading model")
 
     for command in ("prompt", "chat", "bench"):
         check([command, "--help"], 0, "--draft-policy")

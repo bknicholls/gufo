@@ -474,6 +474,7 @@ struct TextRunnerPool::Impl {
               .capacity_bytes = disk_cache_options->capacity_bytes,
               .staging_capacity_bytes =
                   disk_cache_options->staging_capacity_bytes,
+              .shared_prefix_only = disk_cache_options->shared_prefix_only,
           },
           EmitDiskEvent);
       Logger::Info("cache",
@@ -720,7 +721,8 @@ struct TextRunnerPool::Request::Impl {
       }
       const auto saved = disk_store->SaveAsync(
           runner, {prefix.begin(), prefix.end()}, std::move(snapshot),
-          {InputIdentity().begin(), InputIdentity().end()});
+          {InputIdentity().begin(), InputIdentity().end()}, {},
+          ContinuationDiskSaveKind::kSharedPrefix);
       if (saved != 0) {
         ++snapshot_metrics.shared_prefix_snapshots;
         snapshot_metrics.shared_prefix_bytes += saved;
@@ -1444,6 +1446,12 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
     std::erase_if(boundaries, [&lease](std::size_t boundary) {
       return boundary <= lease.cached_tokens();
     });
+    try {
+      impl_->disk_store->RecordPrompt(*impl_->validated.runner, prompt,
+                                      identity);
+    } catch (...) {
+      // Discovery is best effort; this request does not depend on it.
+    }
   }
   return Request(std::make_unique<Request::Impl>(
       impl_->validated.runner, impl_->disk_store, std::move(lease),

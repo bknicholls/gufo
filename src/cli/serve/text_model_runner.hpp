@@ -50,6 +50,8 @@ struct TextRunnerDiskCacheOptions {
   std::size_t shared_prefix_min_tokens{128};
   /// Bound on shared-prefix snapshots written while prefilling one request.
   std::size_t shared_prefix_max_boundaries{4};
+  /// Persist only shared-prefix snapshots; see ContinuationDiskStoreOptions.
+  bool shared_prefix_only{false};
 };
 
 /// Host snapshot budget after accounting for cgroup limits and headroom.

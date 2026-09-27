@@ -53,6 +53,7 @@ struct TextDiskCacheConfig {
   std::size_t capacity_bytes{TextRunnerDiskCacheOptions::kDefaultCapacityBytes};
   /// Zero selects the automatic host RAM budget after session allocation.
   std::size_t staging_capacity_bytes{0};
+  bool shared_prefix_only{false};
   std::string model_artifact_fingerprint;
   std::string draft_model_artifact_fingerprint;
 };
