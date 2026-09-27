@@ -1879,6 +1879,21 @@ HttpResponse HandleOpenAiChat(const HttpRequest& request,
   }
 }
 
+bool ReadChatReasoningOptions(const json::Value& body,
+                              const TextGenerationBackend& backend,
+                              ReasoningOptions* options, std::string* error) {
+  if (!ParseReasoningOptions(body, options, error))
+    return false;
+  const ReasoningOptions defaults = backend.reasoning_defaults();
+  if (!options->enabled.has_value())
+    options->enabled = defaults.enabled;
+  if (!options->effort.has_value())
+    options->effort = defaults.effort;
+  if (!options->preserve_thinking.has_value())
+    options->preserve_thinking = defaults.preserve_thinking;
+  return true;
+}
+
 ReasoningSplit SplitReasoning(
     std::string_view raw,
     TextGenerationBackend::InitialOutputState initial_output_state) {

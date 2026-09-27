@@ -491,7 +491,7 @@ std::optional<HttpResponse> ReadCompatibilityOptions(
     const json::Value& body, TextGenerationBackend& backend,
     std::string_view token_field, std::size_t* max_tokens,
     sampling::SamplingConfig* sampling_config, std::string_view stop_field = {},
-    bool allow_stream = false) {
+    bool allow_stream = false, bool accepts_reasoning_controls = false) {
   if (!body.is_object())
     return InvalidCompatibilityRequest("request body must be an object");
   if (const auto* model = body.find("model"); model != nullptr) {
@@ -538,7 +538,11 @@ std::optional<HttpResponse> ReadCompatibilityOptions(
                                   "truncation",
                                   "modalities",
                                   "audio"}) {
-    if (field != stop_field && body.contains(field)) {
+    const bool reasoning_control = field == "reasoning_effort" ||
+                                   field == "thinking" ||
+                                   field == "chat_template_kwargs";
+    if (field != stop_field && body.contains(field) &&
+        !(accepts_reasoning_controls && reasoning_control)) {
       return InvalidCompatibilityRequest("request field '" + field +
                                          "' is not supported on this endpoint");
     }
@@ -760,9 +764,10 @@ HttpResponse AnthropicMessages(const HttpRequest& req,
 
   std::size_t max_tokens = 0;
   sampling::SamplingConfig sampling_config;
-  if (auto error =
-          ReadCompatibilityOptions(body, b, "max_tokens", &max_tokens,
-                                   &sampling_config, "stop_sequences")) {
+  if (auto error = ReadCompatibilityOptions(
+          body, b, "max_tokens", &max_tokens, &sampling_config,
+          "stop_sequences", /*allow_stream=*/false,
+          /*accepts_reasoning_controls=*/true)) {
     return std::move(*error);
   }
 
@@ -783,7 +788,11 @@ HttpResponse AnthropicMessages(const HttpRequest& req,
 
   ChatRequest chat{std::move(messages)};
   chat.client_id = req.client_id;
-  chat.reasoning = b.reasoning_defaults();
+  std::string reasoning_error;
+  if (!ReadChatReasoningOptions(body, b, &chat.reasoning, &reasoning_error)) {
+    return Err(400, "Bad Request", reasoning_error.c_str(),
+               "invalid_request_error", "invalid_reasoning");
+  }
   if (const auto error = ParseStopSequences(body.find("stop_sequences"),
                                             StopSequenceFormat::kAnthropic,
                                             &chat.stop_sequences))

@@ -477,8 +477,10 @@ All four routes validate the loaded model, positive integer limits and shared
 sampling controls. The three routes above reject streaming; all reject multiple
 candidates. Responses and Messages honor the server's thinking defaults;
 Messages returns generated reasoning as a `thinking` block before the text.
-Native Messages rejects tools, `thinking`, and `output_config`; use Chat
-Completions for tool/reasoning controls. Completions routes accept `stop`;
+Native Messages rejects tools and `output_config`; use Chat Completions for
+tools. Messages accepts the reasoning controls `thinking`, `reasoning_effort`
+and `chat_template_kwargs` as Chat Completions does. Completions routes
+accept `stop`;
 Messages accepts `stop_sequences`. Responses has no stop-sequence field.
 `/infill` and `/v1/messages/count_tokens` return 501: suffix-conditioned infill
 and template-aware message counting are not implemented.

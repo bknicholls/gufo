@@ -711,6 +711,35 @@ void TestAnthropicReasoningBlocks() {
   assert(blocks[0].member_str("text") == "Answer.");
 }
 
+void TestAnthropicReasoningControls() {
+  RunningServer server;
+  server.backend->reasoning = {
+      .enabled = true,
+      .effort = gufo::ReasoningEffort::kHigh,
+      .preserve_thinking = true,
+  };
+  const auto post = [&server](std::string_view controls) {
+    return server.Post(
+        "/v1/messages",
+        std::string(
+            R"({"messages":[{"role":"user","content":"hello"}],"max_tokens":32,)") +
+            std::string(controls) + "}");
+  };
+  ExpectStatus(post(R"("thinking":{"type":"disabled"})"), 200);
+  auto reasoning = server.backend->LastCall().chat.reasoning;
+  assert(reasoning.enabled == false);
+  assert(reasoning.effort == gufo::ReasoningEffort::kHigh);
+  ExpectStatus(post(R"("reasoning_effort":"low")"), 200);
+  reasoning = server.backend->LastCall().chat.reasoning;
+  assert(reasoning.enabled == true);
+  assert(reasoning.effort == gufo::ReasoningEffort::kLow);
+  assert(reasoning.preserve_thinking == true);
+  ExpectStatus(post(R"("chat_template_kwargs":{"enable_thinking":false})"),
+               200);
+  assert(server.backend->LastCall().chat.reasoning.enabled == false);
+  ExpectStatus(post(R"("thinking":{"type":"sometimes"})"), 400);
+}
+
 void TestStreamingFraming() {
   RunningServer server;
   const std::string chunks = std::string("3\r\na\0b\r\n", 8) + "3\r\nend\r\n";
@@ -785,6 +814,7 @@ int main() {
   TestCompatibilityStopSequences();
   TestCompatibilityThinkingDefaults();
   TestAnthropicReasoningBlocks();
+  TestAnthropicReasoningControls();
   TestCompatibilityUtf8();
   TestPeerDisconnect();
   TestStreamingFraming();

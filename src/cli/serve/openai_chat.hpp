@@ -5,6 +5,7 @@
 #include <string_view>
 
 #include "src/cli/serve/http_server.hpp"
+#include "src/core/json.hpp"
 
 namespace gufo::server {
 
@@ -22,6 +23,14 @@ HttpResponse CreateOpenAiResponse(const HttpRequest& request,
                                   std::size_t max_tokens,
                                   const sampling::SamplingConfig& sampling,
                                   bool stream);
+
+/// Reads the reasoning controls a chat request may carry (Anthropic
+/// `thinking`, `reasoning_effort`, `chat_template_kwargs`) and fills the ones
+/// it leaves unset from the backend defaults. Returns false with *error set
+/// for an invalid request.
+bool ReadChatReasoningOptions(const json::Value& body,
+                              const TextGenerationBackend& backend,
+                              ReasoningOptions* options, std::string* error);
 
 struct ReasoningSplit {
   std::string reasoning;
