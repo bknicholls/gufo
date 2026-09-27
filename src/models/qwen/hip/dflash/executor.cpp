@@ -201,11 +201,12 @@ std::size_t QwenDFlashGpuSnapshot::SerializePersistent(
 }
 
 QwenDFlashGpuExecutor::QwenDFlashGpuExecutor(
-    std::shared_ptr<const QwenDFlashGpuModel> model, std::uint32_t max_context)
+    std::shared_ptr<const QwenDFlashGpuModel> model, std::uint32_t max_context,
+    bool reuse_snapshot_buffers)
     : model_(std::move(model)), max_context_(max_context) {
   try {
-    snapshot_buffers_ =
-        std::make_shared<DeviceBufferPool>(kDFlashSnapshotBufferSlots);
+    snapshot_buffers_ = std::make_shared<DeviceBufferPool>(
+        kDFlashSnapshotBufferSlots, reuse_snapshot_buffers);
     Allocate();
     Reset();
   } catch (...) {
@@ -223,7 +224,7 @@ QwenDFlashGpuExecutor::~QwenDFlashGpuExecutor() {
 
 std::unique_ptr<QwenDFlashGpuExecutor> QwenDFlashGpuExecutor::Create(
     std::shared_ptr<const QwenDFlashGpuModel> model, std::uint32_t max_context,
-    std::string* error_msg) {
+    std::string* error_msg, bool reuse_snapshot_buffers) {
   if (model == nullptr || max_context == 0 ||
       max_context > model->GetConfig().context_length) {
     if (error_msg != nullptr) {
@@ -232,8 +233,8 @@ std::unique_ptr<QwenDFlashGpuExecutor> QwenDFlashGpuExecutor::Create(
     return nullptr;
   }
   try {
-    return std::unique_ptr<QwenDFlashGpuExecutor>(
-        new QwenDFlashGpuExecutor(std::move(model), max_context));
+    return std::unique_ptr<QwenDFlashGpuExecutor>(new QwenDFlashGpuExecutor(
+        std::move(model), max_context, reuse_snapshot_buffers));
   } catch (const std::exception& exception) {
     if (error_msg != nullptr) {
       *error_msg = exception.what();

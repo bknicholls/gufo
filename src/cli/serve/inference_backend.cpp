@@ -369,6 +369,7 @@ public:
               .max_context = max_context,
               .max_draft_tokens = speculative_options.max_draft_tokens,
               .policy = speculative_options.dflash_policy,
+              .reuse_snapshot_buffers = execution_policy.reuse_snapshot_buffers,
           },
           &error);
       if (draft_backend == nullptr) {
@@ -795,13 +796,15 @@ public:
       speculative::SpeculativeOptions speculative_options = {},
       std::string artifact_fingerprint = {},
       std::string draft_artifact_fingerprint = {},
-      std::uint32_t max_prompt_batch = hip::kDefaultQwenMaxPromptBatch)
+      std::uint32_t max_prompt_batch = hip::kDefaultQwenMaxPromptBatch,
+      bool reuse_snapshot_buffers = true)
       : model_(std::move(model)),
         dflash_model_(std::move(dflash_model)),
         max_context_(max_context),
         speculative_options_(speculative_options),
         execution_policy_(hip::QwenExecutionPolicy::Production()) {
     execution_policy_.max_prompt_batch = max_prompt_batch;
+    execution_policy_.reuse_snapshot_buffers = reuse_snapshot_buffers;
     if (!artifact_fingerprint.empty()) {
       const bool speculative = dflash_model_ != nullptr;
       persistence_ = TextRunnerPersistenceDescriptor{
@@ -3166,7 +3169,8 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
         std::move(model), max_context, std::move(dflash_model),
         speculative_options, disk_cache_config.model_artifact_fingerprint,
         disk_cache_config.draft_model_artifact_fingerprint,
-        static_cast<std::uint32_t>(prefill_policy.max_batch_tokens));
+        static_cast<std::uint32_t>(prefill_policy.max_batch_tokens),
+        prefill_policy.reuse_snapshot_buffers);
     new_state->model_id = runner->Descriptor().model_id;
     new_state->max_context = max_context;
     std::optional<TextRunnerDiskCacheOptions> runner_disk_cache;

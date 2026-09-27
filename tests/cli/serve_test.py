@@ -65,6 +65,7 @@ def main():
     assert "--cache-disk-shared-prefix-only" in help_text
     assert "--cache-disk-persist-on-stop" in help_text
     assert "--load-on-demand" in help_text
+    assert "--no-snapshot-reuse" in help_text
     check(["bench", "--help"], 0, "Path to GGUF model file (required)")
     for args in (["serve"], ["serve", "llm"], ["bench"],
                  ["serve", "llm", "--model", ""], ["bench", "--model", ""]):

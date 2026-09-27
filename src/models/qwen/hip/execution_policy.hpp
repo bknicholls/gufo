@@ -42,6 +42,9 @@ struct QwenExecutionPolicy {
   QwenRecurrentStateStorage recurrent_state_storage{
       QwenRecurrentStateStorage::kFp32};
   std::uint32_t max_prompt_batch{kDefaultQwenMaxPromptBatch};
+  // Keeps a released snapshot's device memory for the next snapshot,
+  // holding up to one extra snapshot to skip an allocation per request.
+  bool reuse_snapshot_buffers{true};
 
   [[nodiscard]] static constexpr QwenExecutionPolicy Production() noexcept {
     return {};

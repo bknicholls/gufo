@@ -142,7 +142,8 @@ public:
 
   [[nodiscard]] static std::unique_ptr<QwenDFlashGpuExecutor> Create(
       std::shared_ptr<const QwenDFlashGpuModel> model,
-      std::uint32_t max_context = 4096, std::string* error_msg = nullptr);
+      std::uint32_t max_context = 4096, std::string* error_msg = nullptr,
+      bool reuse_snapshot_buffers = true);
 
   void Reset() noexcept;
 
@@ -197,7 +198,7 @@ public:
 
 private:
   QwenDFlashGpuExecutor(std::shared_ptr<const QwenDFlashGpuModel> model,
-                        std::uint32_t max_context);
+                        std::uint32_t max_context, bool reuse_snapshot_buffers);
 
   bool InjectTargetContextChunk(std::span<const float> target_features,
                                 std::uint32_t position,
@@ -261,6 +262,7 @@ struct QwenDFlashGpuDraftConfig {
   std::uint32_t max_draft_tokens{7};
   speculative::DFlashDraftPolicy policy{
       speculative::DFlashDraftPolicy::kAdaptive};
+  bool reuse_snapshot_buffers{true};
 };
 
 /// Adapts the GPU DFlash executor to the repository's IDraftBackend speculative

@@ -582,6 +582,12 @@ void PrintServeHelp(std::string_view program_name,
                    "Persist the conversations held in memory when the server "
                    "stops, so a restart resumes them",
                    "Cache", &cache_disk_persist_on_stop);
+    bool no_snapshot_reuse = false;
+    parser.AddFlag("", "--no-snapshot-reuse",
+                   "Free each replaced prompt snapshot instead of keeping "
+                   "its memory for the next; saves up to one snapshot of "
+                   "memory for an allocation per request",
+                   "Cache", &no_snapshot_reuse);
     std::uint64_t idle_timeout_seconds = 0;
     parser.AddOption("", "--idle-timeout", "SEC",
                      "Exit, or unload with --load-on-demand, after SEC "
@@ -1056,6 +1062,12 @@ int RunServe(std::span<const char* const> args) {
                        "Persist the conversations held in memory when the "
                        "server stops, so a restart resumes them",
                        "Cache", &cache_disk_persist_on_stop);
+    bool no_snapshot_reuse = false;
+    llm_parser.AddFlag("", "--no-snapshot-reuse",
+                       "Free each replaced prompt snapshot instead of "
+                       "keeping its memory for the next; saves up to one "
+                       "snapshot of memory for an allocation per request",
+                       "Cache", &no_snapshot_reuse);
     llm_parser.AddOption("", "--idle-timeout", "SEC",
                          "Exit, or unload with --load-on-demand, after SEC "
                          "seconds without a request; 0 never (default: 0)",
@@ -1182,6 +1194,7 @@ int RunServe(std::span<const char* const> args) {
                        server::TextPrefillPolicy{
                            .decode_active_tokens = prefill_chunk_tokens,
                            .max_batch_tokens = prefill_batch_tokens,
+                           .reuse_snapshot_buffers = !no_snapshot_reuse,
                        },
                        server::TextSchedulerPolicy{
                            .max_pending_requests = max_pending_requests,

@@ -205,8 +205,9 @@ std::unique_ptr<QwenDFlashGpuDraftBackend> QwenDFlashGpuDraftBackend::Create(
   config.max_draft_tokens = std::min(
       {config.max_draft_tokens, model->GetDFlashConfig().block_size - 1U,
        speculative::DFlashLengthController::kMaxDraftTokens});
-  auto executor = QwenDFlashGpuExecutor::Create(std::move(model),
-                                                config.max_context, error_msg);
+  auto executor =
+      QwenDFlashGpuExecutor::Create(std::move(model), config.max_context,
+                                    error_msg, config.reuse_snapshot_buffers);
   if (executor == nullptr) {
     return nullptr;
   }

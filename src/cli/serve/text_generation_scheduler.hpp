@@ -41,6 +41,9 @@ inline constexpr std::size_t kMinMaxPrefillBatchTokens = 1024;
 struct TextPrefillPolicy {
   std::size_t decode_active_tokens{kDefaultDecodeActivePrefillTokens};
   std::size_t max_batch_tokens{kDefaultMaxPrefillBatchTokens};
+  // Keeps a released prompt snapshot's memory for the next snapshot,
+  // trading up to one extra snapshot for an allocation per request.
+  bool reuse_snapshot_buffers{true};
 };
 
 struct TextSchedulerPolicy {

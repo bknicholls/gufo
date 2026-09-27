@@ -148,6 +148,11 @@ Qwen prefill batch processes. The prefill scratch buffers scale with it, so a
 smaller batch trades prompt throughput for memory on hosts where the GPU shares
 system RAM.
 
+A replaced Qwen prompt snapshot keeps its GPU memory for the next snapshot,
+because allocating that memory costs more than filling it. A conversation
+therefore holds up to one extra snapshot. `--no-snapshot-reuse` frees it
+instead, for hosts where that memory matters more than the allocation time.
+
 Prompt reuse is enabled by default. `cache_prompt: false` on
 `/v1/chat/completions` bypasses both memory and disk lookup for that request;
 the result can still populate the cache. DeepSeek and Qwen tool requests retain

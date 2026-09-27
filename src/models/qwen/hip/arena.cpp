@@ -700,8 +700,8 @@ QwenGpuArena::QwenGpuArena(const core::ModelConfig& config,
       max_batch_(std::min(max_context_, MaxPromptBatch(policy))),
       policy_(policy) {
   try {
-    snapshot_buffers_ =
-        std::make_shared<DeviceBufferPool>(kSnapshotBufferSlots);
+    snapshot_buffers_ = std::make_shared<DeviceBufferPool>(
+        kSnapshotBufferSlots, policy_.reuse_snapshot_buffers);
     HIP_CHECK(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking));
     HIPBLAS_CHECK(hipblasCreate(&hipblas_handle));
     HIPBLAS_CHECK(hipblasSetStream(hipblas_handle, stream));

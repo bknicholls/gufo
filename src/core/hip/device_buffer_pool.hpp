@@ -26,10 +26,13 @@ struct PooledDeviceBuffer {
 /// bound when enabled. Request snapshots are allocated and freed once per
 /// request and grow slowly as a conversation does, so a new buffer gets room
 /// to grow for a released one to fit the next several, larger, requests.
-/// A slot is one buffer role, such as a snapshot's KV planes.
+/// A slot is one buffer role, such as a snapshot's KV planes. Without
+/// `retain` the pool only allocates exact sizes and frees, for hosts where
+/// the retained memory matters more than the allocation time.
 class DeviceBufferPool {
 public:
-  explicit DeviceBufferPool(std::size_t slots) : retained_(slots) {}
+  explicit DeviceBufferPool(std::size_t slots, bool retain = true)
+      : retained_(slots), retain_(retain) {}
   ~DeviceBufferPool() {
     for (const auto& buffer : retained_)
       if (buffer.data != nullptr)
@@ -57,8 +60,9 @@ public:
       }
     }
     PooledDeviceBuffer buffer{
-        .capacity =
-            std::clamp(bytes + bytes / 4, bytes, std::max(bytes, max_bytes))};
+        .capacity = retain_ ? std::clamp(bytes + bytes / 4, bytes,
+                                         std::max(bytes, max_bytes))
+                            : bytes};
     if (hipMalloc(&buffer.data, buffer.capacity) == hipSuccess)
       return buffer;
     (void)hipGetLastError();
@@ -74,7 +78,7 @@ public:
   void Release(std::size_t slot, PooledDeviceBuffer buffer) noexcept {
     if (buffer.data == nullptr)
       return;
-    {
+    if (retain_) {
       const std::lock_guard<std::mutex> lock(mutex_);
       if (slot < retained_.size()) {
         auto& retained = retained_[slot];
@@ -89,6 +93,7 @@ public:
 private:
   std::mutex mutex_;
   std::vector<PooledDeviceBuffer> retained_;
+  bool retain_;
 };
 
 }  // namespace gufo::hip
